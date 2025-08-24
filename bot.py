@@ -20,7 +20,7 @@ BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 PUSH_SUBSCRIBERS_FILE = "push_subscribers.json"
 if not os.path.exists(PUSH_SUBSCRIBERS_FILE):
     with open(PUSH_SUBSCRIBERS_FILE, "w") as f:
-        json.dump([MAIN_CHAT_ID], f)  # По умолчанию — главный чат
+        json.dump([MAIN_CHAT_ID], f)
 
 def load_push_subscribers():
     try:
@@ -38,29 +38,30 @@ def add_push_subscriber(chat_id):
         return True
     return False
 
-# === Загрузка live-матчей с SofaScore ===
+# === Загрузка live-матчей с SofaScore через прокси ===
 def get_sofascore_live():
-    url = "https://www.sofascore.com/api/v1/sport/football/events/live"
+    url = "https://api-pub.sb.scoreticker.com/api/v1/sport/football/events/live"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'Accept': 'application/json',
         'Referer': 'https://www.sofascore.com/',
         'Origin': 'https://www.sofascore.com',
-        'Sec-Fetch-Site': 'same-origin'
+        'Sec-Fetch-Site': 'same-origin',
+        'Connection': 'keep-alive'
     }
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             matches = []
-            for event in data['events']:
+            for event in data.get('events', []):
                 try:
                     home = event['homeTeam']['name']
                     away = event['awayTeam']['name']
                     score = f"{event['homeScore']['current']}:{event['awayScore']['current']}"
                     minute = event['minute']
                     status = event['status']['type']
-                    if status != "notstarted":
+                    if status in ["live", "paused"]:
                         match_data = {
                             'home': home,
                             'away': away,
@@ -68,22 +69,19 @@ def get_sofascore_live():
                             'minute': minute,
                             'status': status
                         }
-                        # xG (если есть)
                         if 'xG' in event:
                             match_data['xG_home'] = round(event['xG']['home'], 2)
                             match_data['xG_away'] = round(event['xG']['away'], 2)
-                        # Статистика (владение, удары)
                         if 'statistics' in event:
                             for stat in event['statistics']:
-                                if stat['type'] == 'attacks':
+                                if stat['type'] == 'possession':
+                                    match_data['possession'] = f"{stat['home']}% - {stat['away']}%"
+                                elif stat['type'] == 'attacks':
                                     match_data['attacks'] = f"{stat['home']} - {stat['away']}"
                                 elif stat['type'] == 'dangerous_attacks':
                                     match_data['danger_attacks'] = f"{stat['home']} - {stat['away']}"
-                                elif stat['type'] == 'possession':
-                                    match_data['possession'] = f"{stat['home']}% - {stat['away']}%"
                         matches.append(match_data)
-                except KeyError:
-                    continue
+                except: continue
             return matches
         else:
             logger.error(f"❌ Ошибка SofaScore: {response.status_code}")
@@ -98,11 +96,8 @@ def predict_live_match(match):
     xG2 = match.get('xG_away', 0.0)
     score1, score2 = map(int, match['score'].split(':'))
     total_xG = xG1 + xG2
-
-    # Учитываем счёт и xG
     adj_xG1 = xG1 + (score1 * 0.5)
     adj_xG2 = xG2 + (score2 * 0.5)
-
     if adj_xG1 > adj_xG2 + 0.5:
         winner = match['home']
         confidence = "Высокая"
@@ -112,7 +107,6 @@ def predict_live_match(match):
     else:
         winner = "Ничья"
         confidence = "Средняя"
-
     total_pred = "Over 2.5" if total_xG > 2.7 else "Under 2.5"
     return {
         'winner': winner,
@@ -181,7 +175,7 @@ def get_updates(offset=None):
         logger.error(f"❌ Ошибка: {e}")
         return {"ok": False}
 
-# === Проверка live-матчей и push-уведомлений ===
+# === Проверка live-матчей ===
 def check_live_matches_with_push(roi_tracker):
     matches = get_sofascore_live()
     if not matches:
@@ -197,19 +191,12 @@ def check_live_matches_with_push(roi_tracker):
         if 'xG_home' in match:
             message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
         if 'possession' in match:
-            message += f"📊 Владение: {match['possession']}\n"
-        if 'attacks' in match:
-            message += f"💥 Атаки: {match['attacks']}\n"
+            message += f"�� Владение: {match['possession']}\n"
         message += (
             f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
             f"📈 Тотал: *{pred['total_pred']}*"
         )
         send_message(MAIN_CHAT_ID, message, parse_mode='Markdown')
-        logger.info(f"🔔 Live: {match['home']} vs {match['away']}")
-
-        # Симуляция ставки
-        if pred['confidence'] == "Высокая":
-            roi_tracker.place_bet(amount=10, odds=1.8, win=True, match=f"{match['home']} vs {match['away']}")
 
 # === Основной цикл бота ===
 def run_bot():
@@ -229,7 +216,7 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Ты подписан на live-матчи с SofaScore.")
+                        send_message(chat_id, "👋 Привет! Live-матчи с SofaScore работают.")
 
                     elif text == "/live":
                         matches = get_sofascore_live()
@@ -263,7 +250,6 @@ def run_bot():
                         )
                         send_message(chat_id, message, parse_mode='Markdown')
 
-            # Проверка каждые 30 секунд
             check_live_matches_with_push(roi_tracker)
             time.sleep(30)
 
@@ -271,7 +257,7 @@ def run_bot():
             logger.error(f"🚨 Ошибка: {e}")
             time.sleep(10)
 
-# === Веб-сервер для Render ===
+# === Веб-сервер ===
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -285,7 +271,7 @@ def run_web():
     logger.info(f"🌍 Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
-# === Запуск бота и веба ===
+# === Запуск ===
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web, daemon=True)
     web_thread.start()
