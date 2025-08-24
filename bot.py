@@ -3,11 +3,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 import json
 import requests
-import pandas as pd
-from io import StringIO
-from datetime import datetime, timedelta
-import logging
 import time
+import logging
 import os
 
 # Настройка
@@ -41,89 +38,88 @@ def add_push_subscriber(chat_id):
         return True
     return False
 
-# === Загрузка данных из football-data.co.uk ===
-def load_data():
-    leagues = {
-        'E0': 'Premier League',
-        'D1': 'Bundesliga',
-        'I1': 'Serie A',
-        'F1': 'Ligue 1',
-        'SP1': 'La Liga'
+# === Загрузка live-матчей с SofaScore ===
+def get_sofascore_live():
+    url = "https://www.sofascore.com/api/v1/sport/football/events/live"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Referer': 'https://www.sofascore.com/',
+        'Origin': 'https://www.sofascore.com',
+        'Sec-Fetch-Site': 'same-origin'
     }
-    all_matches = []
-    for code, name in leagues.items():
-        url = f"https://www.football-data.co.uk/mmz4281/2324/{code}.csv"
-        try:
-            df = pd.read_csv(StringIO(requests.get(url).text))
-            df['League'] = name
-            df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-            all_matches.append(df)
-            logger.info(f"✅ {name} загружена")
-        except Exception as e:
-            logger.error(f"❌ {name}: {e}")
-    return pd.concat(all_matches, ignore_index=True) if all_matches else pd.DataFrame()
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            matches = []
+            for event in data['events']:
+                try:
+                    home = event['homeTeam']['name']
+                    away = event['awayTeam']['name']
+                    score = f"{event['homeScore']['current']}:{event['awayScore']['current']}"
+                    minute = event['minute']
+                    status = event['status']['type']
+                    if status != "notstarted":
+                        match_data = {
+                            'home': home,
+                            'away': away,
+                            'score': score,
+                            'minute': minute,
+                            'status': status
+                        }
+                        # xG (если есть)
+                        if 'xG' in event:
+                            match_data['xG_home'] = round(event['xG']['home'], 2)
+                            match_data['xG_away'] = round(event['xG']['away'], 2)
+                        # Статистика (владение, удары)
+                        if 'statistics' in event:
+                            for stat in event['statistics']:
+                                if stat['type'] == 'attacks':
+                                    match_data['attacks'] = f"{stat['home']} - {stat['away']}"
+                                elif stat['type'] == 'dangerous_attacks':
+                                    match_data['danger_attacks'] = f"{stat['home']} - {stat['away']}"
+                                elif stat['type'] == 'possession':
+                                    match_data['possession'] = f"{stat['home']}% - {stat['away']}%"
+                        matches.append(match_data)
+                except KeyError:
+                    continue
+            return matches
+        else:
+            logger.error(f"❌ Ошибка SofaScore: {response.status_code}")
+            return []
+    except Exception as e:
+        logger.error(f"❌ Ошибка запроса: {e}")
+        return []
 
-# === Live-матчи (симуляция) ===
-def get_live_matches():
-    return [
-        {
-            'home': 'Arsenal',
-            'away': 'Man City',
-            'score': '1:1',
-            'minute': 67,
-            'possession': '52% - 48%',
-            'shots': '12 - 9',
-            'shots_on_target': '5 - 4',
-            'xG': '1.8 - 1.5',
-            'b365_h': 2.1,
-            'b365_d': 3.4,
-            'b365_a': 3.6,
-            'status': 'LIVE'
-        },
-        {
-            'home': 'Liverpool',
-            'away': 'Chelsea',
-            'score': '0:0',
-            'minute': 34,
-            'possession': '60% - 40%',
-            'shots': '7 - 4',
-            'shots_on_target': '3 - 2',
-            'xG': '0.9 - 0.6',
-            'b365_h': 1.9,
-            'b365_d': 3.8,
-            'b365_a': 4.2,
-            'status': 'LIVE'
-        }
-    ]
+# === Прогноз в live-матче ===
+def predict_live_match(match):
+    xG1 = match.get('xG_home', 0.0)
+    xG2 = match.get('xG_away', 0.0)
+    score1, score2 = map(int, match['score'].split(':'))
+    total_xG = xG1 + xG2
 
-# === Прогноз матча ===
-def predict_match(team1, team2, df):
-    home_games = df[df['HomeTeam'] == team1]
-    away_games = df[df['AwayTeam'] == team2]
-    xG1 = home_games['FTHG'].mean() if len(home_games) > 0 else 1.5
-    xG2 = away_games['FTAG'].mean() if len(away_games) > 0 else 1.2
-    if xG1 > xG2 + 0.3:
-        result = f"Победа {team1}"
-    elif xG2 > xG1 + 0.3:
-        result = f"Победа {team2}"
+    # Учитываем счёт и xG
+    adj_xG1 = xG1 + (score1 * 0.5)
+    adj_xG2 = xG2 + (score2 * 0.5)
+
+    if adj_xG1 > adj_xG2 + 0.5:
+        winner = match['home']
+        confidence = "Высокая"
+    elif adj_xG2 > adj_xG1 + 0.5:
+        winner = match['away']
+        confidence = "Высокая"
     else:
-        result = "Вероятна ничья"
+        winner = "Ничья"
+        confidence = "Средняя"
+
+    total_pred = "Over 2.5" if total_xG > 2.7 else "Under 2.5"
     return {
-        'xG1': round(xG1, 2),
-        'xG2': round(xG2, 2),
-        'result': result
+        'winner': winner,
+        'confidence': confidence,
+        'total_pred': total_pred,
+        'adj_xG': f"{adj_xG1:.2f} — {adj_xG2:.2f}"
     }
-
-# === Прогноз тотала (over/under 2.5) ===
-def predict_total(team1, team2, df):
-    pred = predict_match(team1, team2, df)
-    total_xG = pred['xG1'] + pred['xG2']
-    if total_xG > 2.7:
-        return {'total': 'Over 2.5', 'confidence': 'Высокая', 'total_xG': total_xG}
-    elif total_xG > 2.3:
-        return {'total': 'Over 2.5', 'confidence': 'Средняя', 'total_xG': total_xG}
-    else:
-        return {'total': 'Under 2.5', 'confidence': 'Высокая', 'total_xG': total_xG}
 
 # === ROI-трекер ===
 class ROI_Tracker:
@@ -149,7 +145,7 @@ class ROI_Tracker:
             'odds': odds,
             'result': result,
             'profit': round(amount * (odds - 1) if win else -amount, 2),
-            'date': datetime.now().strftime('%d.%m %H:%M')
+            'date': time.strftime('%d.%m %H:%M')
         })
 
     def report(self):
@@ -185,66 +181,40 @@ def get_updates(offset=None):
         logger.error(f"❌ Ошибка: {e}")
         return {"ok": False}
 
-# === Генерация событий (для симуляции) ===
-def generate_random_event(match):
-    import random
-    events = ["goal", "yellow", "red", "penalty", "shot_on_target"]
-    if random.random() < 0.05:
-        return random.choice(events)
-    return None
-
-# === Отправка push-уведомлений ===
-def send_push_notification(message):
-    subscribers = load_push_subscribers()
-    for chat_id in subscribers:
-        send_message(chat_id, message, parse_mode='Markdown')
-
 # === Проверка live-матчей и push-уведомлений ===
-def check_live_matches_with_push(df, roi_tracker):
-    matches = get_live_matches()
+def check_live_matches_with_push(roi_tracker):
+    matches = get_sofascore_live()
+    if not matches:
+        logger.info("🔴 Нет live-матчей")
+        return
+
     for match in matches:
-        event = generate_random_event(match)
-        message = None
+        pred = predict_live_match(match)
+        message = (
+            f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+            f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
+        )
+        if 'xG_home' in match:
+            message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
+        if 'possession' in match:
+            message += f"📊 Владение: {match['possession']}\n"
+        if 'attacks' in match:
+            message += f"💥 Атаки: {match['attacks']}\n"
+        message += (
+            f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
+            f"📈 Тотал: *{pred['total_pred']}*"
+        )
+        send_message(MAIN_CHAT_ID, message, parse_mode='Markdown')
+        logger.info(f"🔔 Live: {match['home']} vs {match['away']}")
 
-        if event == "goal":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            match['score'] = f"{eval(match['score'].split(':')[0]) + 1}:{match['score'].split(':')[1]}" if team == match['home'] else f"{match['score'].split(':')[0]}:{eval(match['score'].split(':')[1]) + 1}"
-            message = f"⚽ *ГОЛ!* {team} забил! Счёт: {match['score']} (мин: {match['minute']})"
-        elif event == "yellow":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"🟨 *ЖЁЛТАЯ КАРТОЧКА* для игрока {team} (мин: {match['minute']})"
-        elif event == "red":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"🟥 *КРАСНАЯ КАРТОЧКА* для игрока {team}! {team} остаётся в меньшинстве (мин: {match['minute']})"
-        elif event == "penalty":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"🎯 *ПЕНАЛЬТИ* для {team}! (мин: {match['minute']})"
-        elif event == "shot_on_target":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"💥 *УДАР В СТОР!* {team} создаёт момент! (мин: {match['minute']})"
-
-        if message:
-            send_push_notification(message)
-
-        # Прогноз каждые 30 секунд
-        if datetime.now().second % 30 == 0:
-            pred = predict_match(match['home'], match['away'], df)
-            total_pred = predict_total(match['home'], match['away'], df)
-            message = (
-                f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
-                f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
-                f"📊 Владение: {match['possession']}\n"
-                f"🎯 xG: {match['xG']}\n"
-                f"🔥 Прогноз: *{pred['result']}*\n"
-                f"📈 Тотал: *{total_pred['total']}* ({total_pred['confidence']})"
-            )
-            send_push_notification(message)
+        # Симуляция ставки
+        if pred['confidence'] == "Высокая":
+            roi_tracker.place_bet(amount=10, odds=1.8, win=True, match=f"{match['home']} vs {match['away']}")
 
 # === Основной цикл бота ===
 def run_bot():
     logger.info("✅ Бот запущен — ожидаем команды...")
     offset = None
-    df = load_data()
     roi_tracker = ROI_Tracker()
 
     while True:
@@ -259,50 +229,30 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Ты подписан на push-уведомления.")
+                        send_message(chat_id, "👋 Привет! Ты подписан на live-матчи с SofaScore.")
 
                     elif text == "/live":
-                        matches = get_live_matches()
-                        for match in matches:
-                            pred = predict_match(match['home'], match['away'], df)
-                            total_pred = predict_total(match['home'], match['away'], df)
-                            message = (
-                                f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
-                                f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
-                                f"📊 Владение: {match['possession']}\n"
-                                f"🎯 xG: {match['xG']}\n"
-                                f"🔥 Прогноз: *{pred['result']}*\n"
-                                f"📈 Тотал: *{total_pred['total']}* ({total_pred['confidence']})"
-                            )
-                            send_message(chat_id, message, parse_mode='Markdown')
-
-                    elif text.startswith("/predict"):
-                        args = text.split()[1:]
-                        if len(args) >= 2:
-                            team1, team2 = args[0], " ".join(args[1:])
-                            pred = predict_match(team1, team2, df)
-                            message = (
-                                f"🔮 *Прогноз: {team1} vs {team2}*\n\n"
-                                f"🎯 xG: {pred['xG1']} — {pred['xG2']}\n"
-                                f"🏆 Исход: *{pred['result']}*"
-                            )
-                            send_message(chat_id, message, parse_mode='Markdown')
-
-                    elif text.startswith("/total"):
-                        args = text.split()[1:]
-                        if len(args) >= 2:
-                            team1, team2 = args[0], " ".join(args[1:])
-                            total_pred = predict_total(team1, team2, df)
-                            message = (
-                                f"🎯 *Прогноз на тотал: {team1} vs {team2}*\n\n"
-                                f"• Сумма xG: {total_pred['total_xG']:.2f}\n"
-                                f"• Прогноз: *{total_pred['total']}*\n"
-                                f"• Уверенность: {total_pred['confidence']}"
-                            )
-                            send_message(chat_id, message, parse_mode='Markdown')
+                        matches = get_sofascore_live()
+                        if not matches:
+                            send_message(chat_id, "🔴 Сейчас нет live-матчей.")
+                        else:
+                            for match in matches:
+                                pred = predict_live_match(match)
+                                message = (
+                                    f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+                                    f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
+                                )
+                                if 'xG_home' in match:
+                                    message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
+                                if 'possession' in match:
+                                    message += f"📊 Владение: {match['possession']}\n"
+                                message += (
+                                    f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
+                                    f"📈 Тотал: *{pred['total_pred']}*"
+                                )
+                                send_message(chat_id, message, parse_mode='Markdown')
 
                     elif text == "/roi":
-                        roi_tracker.place_bet()
                         report = roi_tracker.report()
                         message = (
                             f"📊 *Отчёт по ставкам*\n"
@@ -313,10 +263,9 @@ def run_bot():
                         )
                         send_message(chat_id, message, parse_mode='Markdown')
 
-            # Проверка live-матчей каждые 15 секунд
-            if df is not None:
-                check_live_matches_with_push(df, roi_tracker)
-            time.sleep(15)
+            # Проверка каждые 30 секунд
+            check_live_matches_with_push(roi_tracker)
+            time.sleep(30)
 
         except Exception as e:
             logger.error(f"🚨 Ошибка: {e}")
@@ -328,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — LIVE, Push, ROI, Тоталы, Коэффициенты</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Live-матчи с SofaScore</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
