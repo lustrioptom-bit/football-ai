@@ -19,6 +19,68 @@ TOKEN = "8304903389:AAGRyWP4Ez97aoA-yLTYzYLQHuKbutTfcy4"
 MAIN_CHAT_ID = "8431596511"
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 
+# === Live-матчи (симуляция) ===
+def get_live_matches():
+    # В реальности — из API (например, SofaScore, Sportmonks)
+    return [
+        {
+            'home': 'Arsenal',
+            'away': 'Man City',
+            'score': '1:1',
+            'minute': 67,
+            'possession': '52% - 48%',
+            'shots': '12 - 9',
+            'xG': '1.8 - 1.5',
+            'danger_attacks': '65 - 58',
+            'status': 'LIVE'
+        },
+        {
+            'home': 'Liverpool',
+            'away': 'Chelsea',
+            'score': '0:0',
+            'minute': 34,
+            'possession': '60% - 40%',
+            'shots': '7 - 4',
+            'xG': '0.9 - 0.6',
+            'danger_attacks': '45 - 30',
+            'status': 'LIVE'
+        }
+    ]
+
+# === Прогноз в live-матче ===
+def predict_live_match(match):
+    xG1 = float(match['xG'].split(' - ')[0])
+    xG2 = float(match['xG'].split(' - ')[1])
+    score1, score2 = map(int, match['score'].split(':'))
+    time_left = 90 - match['minute']
+
+    # Учитываем счёт и xG
+    adj_xG1 = xG1 + (score1 * 0.5)
+    adj_xG2 = xG2 + (score2 * 0.5)
+
+    total_xG = adj_xG1 + adj_xG2
+    if total_xG > 3.0:
+        total_pred = "Over 2.5"
+    else:
+        total_pred = "Under 2.5"
+
+    if adj_xG1 > adj_xG2 + 0.5:
+        winner = match['home']
+        confidence = "Высокая"
+    elif adj_xG2 > adj_xG1 + 0.5:
+        winner = match['away']
+        confidence = "Высокая"
+    else:
+        winner = "Ничья"
+        confidence = "Средняя"
+
+    return {
+        'winner': winner,
+        'confidence': confidence,
+        'total_pred': total_pred,
+        'adj_xG': f"{adj_xG1:.2f} — {adj_xG2:.2f}"
+    }
+
 # === ROI-трекер ===
 class ROI_Tracker:
     def __init__(self):
@@ -37,7 +99,6 @@ class ROI_Tracker:
             self.wins += 1
         else:
             self.profit -= amount
-
         self.history.append({
             'match': match,
             'amount': amount,
@@ -56,9 +117,6 @@ class ROI_Tracker:
             'accuracy': round(accuracy * 100, 1),
             'roi': round(roi, 1)
         }
-
-    def get_history(self, n=5):
-        return self.history[-n:]
 
 # === Подписчики ===
 SUBSCRIBERS_FILE = "subscribers.json"
@@ -86,70 +144,6 @@ def add_free_trial(chat_id):
         return True
     return False
 
-# === Загрузка данных из Understat (реальные xG) ===
-def get_understat_data(team_name):
-    understat_mock = {
-        'Arsenal': {'xG_for': 2.1, 'xG_against': 0.9, 'form': 7.2},
-        'Man City': {'xG_for': 2.5, 'xG_against': 0.7, 'form': 8.1},
-        'Liverpool': {'xG_for': 1.9, 'xG_against': 1.0, 'form': 6.8},
-    }
-    return understat_mock.get(team_name, {'xG_for': 1.5, 'xG_against': 1.2, 'form': 5.0})
-
-# === Загрузка календаря матчей ===
-def load_schedule():
-    return [
-        {
-            'home': 'Arsenal',
-            'away': 'Man City',
-            'datetime': datetime.now() + timedelta(hours=1, minutes=10),
-            'league': 'Premier League',
-            'b365_h': 2.1,
-            'b365_d': 3.4,
-            'b365_a': 3.6,
-            'b365_o25': 2.0,
-            'b365_u25': 1.8
-        }
-    ]
-
-# === Прогноз матча (основной) ===
-def predict_match(team1, team2):
-    u1 = get_understat_data(team1)
-    u2 = get_understat_data(team2)
-    xG1 = u1['xG_for'] * 0.7 + u2['xG_against'] * 0.3
-    xG2 = u2['xG_for'] * 0.7 + u1['xG_against'] * 0.3
-    total_xG = xG1 + xG2
-    if xG1 > xG2 + 0.3:
-        result = f"Победа {team1}"
-    elif xG2 > xG1 + 0.3:
-        result = f"Победа {team2}"
-    else:
-        result = "Вероятна ничья"
-    return {
-        'xG1': round(xG1, 2),
-        'xG2': round(xG2, 2),
-        'total_xG': round(total_xG, 2),
-        'result': result
-    }
-
-# === Прогноз тотала (over/under 2.5) ===
-def predict_total(team1, team2):
-    pred = predict_match(team1, team2)
-    total_xG = pred['total_xG']
-    if total_xG > 2.7:
-        total_result = "Over 2.5"
-        confidence = "Высокая"
-    elif total_xG > 2.3:
-        total_result = "Over 2.5"
-        confidence = "Средняя"
-    else:
-        total_result = "Under 2.5"
-        confidence = "Высокая"
-    return {
-        'total_result': total_result,
-        'total_xG': pred['total_xG'],
-        'confidence': confidence
-    }
-
 # === Отправка сообщения ===
 def send_message(chat_id, text, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -173,44 +167,25 @@ def get_updates(offset=None):
         logger.error(f"❌ Ошибка: {e}")
         return {"ok": False}
 
-# === Проверка матчей и уведомления ===
-def check_upcoming_matches(roi_tracker):
-    matches = load_schedule()
+# === Проверка live-матчей ===
+def check_live_matches(roi_tracker):
     now = datetime.now()
-    for match in matches:
-        if now + timedelta(minutes=50) < match['datetime'] <= now + timedelta(minutes=70):
-            pred = predict_match(match['home'], match['away'])
-            total_pred = predict_total(match['home'], match['away'])
-            bookie_probs = {
-                'H': 1 / match['b365_h'],
-                'D': 1 / match['b365_d'],
-                'A': 1 / match['b365_a']
-            }
-            total = sum(bookie_probs.values())
-            bookie_probs = {k: v / total for k, v in bookie_probs.items()}
-            ai_probs = {'H': 0.55, 'D': 0.25, 'A': 0.20}
-            edge = {k: ai_probs[k] - bookie_probs[k] for k in ai_probs}
-            signals = [k for k, v in edge.items() if v > 0.10]
-
+    # Каждые 15 секунд обновляем live-прогнозы
+    if now.second % 15 == 0:
+        matches = get_live_matches()
+        for match in matches:
+            pred = predict_live_match(match)
             message = (
-                f"⏰ *Предстоящий матч*\n"
-                f"{match['home']} ⚔️ {match['away']}\n\n"
-                f"🔮 *Прогноз AI*:\n"
-                f"• Победитель: *{pred['result']}*\n"
-                f"• xG: {pred['xG1']} — {pred['xG2']}\n"
-                f"• Сумма xG: {pred['total_xG']}\n"
-                f"• Тотал: *{total_pred['total_result']}* ({total_pred['confidence']} уверенность)\n\n"
-                f"📘 *B365*: H{match['b365_h']} D{match['b365_d']} A{match['b365_a']}"
+                f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+                f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
+                f"📊 Владение: {match['possession']}\n"
+                f"🎯 xG: {match['xG']}\n"
+                f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
+                f"📈 Тотал: {pred['total_pred']}"
             )
-
-            if signals:
-                signal_str = " | ".join([{'H': match['home'], 'D': 'Ничья', 'A': match['away']}[s] for s in signals])
-                message += f"\n\n🎯 *СИГНАЛ НА СТАВКУ!* 🔥\nВысокий перевес: {signal_str}"
-                odds = {'H': match['b365_h'], 'D': match['b365_d'], 'A': match['b365_a']}[signals[0]]
-                roi_tracker.place_bet(amount=10, odds=odds, win=True, match=f"{match['home']} vs {match['away']}")
-
             send_message(MAIN_CHAT_ID, message, parse_mode='Markdown')
-            logger.info(f"🔔 Уведомление: {match['home']} vs {match['away']}")
+            logger.info(f"🔴 Live: {match['home']} vs {match['away']} — {match['score']}")
+        time.sleep(1)
 
 # === Основной цикл бота ===
 def run_bot():
@@ -237,77 +212,54 @@ def run_bot():
 
                     elif text == "/trial":
                         if add_free_trial(chat_id):
-                            send_message(chat_id, "🎉 Ты получил 14 дней бесплатного доступа! Используй /predict или /total")
+                            send_message(chat_id, "🎉 Ты получил 14 дней бесплатного доступа! Используй /live")
                         else:
                             send_message(chat_id, "❌ Ты уже использовал бесплатный период.")
 
-                    elif text.startswith("/predict") and is_subscriber(chat_id):
-                        args = text.split()[1:]
-                        if len(args) >= 2:
-                            team1, team2 = args[0], " ".join(args[1:])
-                            pred = predict_match(team1, team2)
+                    elif text == "/live":
+                        matches = get_live_matches()
+                        for match in matches:
+                            pred = predict_live_match(match)
                             message = (
-                                f"🔮 *Прогноз: {team1} vs {team2}*\n\n"
-                                f"🎯 xG: {pred['xG1']} — {pred['xG2']}\n"
-                                f"📊 Сумма xG: {pred['total_xG']}\n"
-                                f"🏆 Исход: *{pred['result']}*"
-                            )
-                            send_message(chat_id, message, parse_mode='Markdown')
-
-                    elif text.startswith("/total") and is_subscriber(chat_id):
-                        args = text.split()[1:]
-                        if len(args) >= 2:
-                            team1, team2 = args[0], " ".join(args[1:])
-                            total_pred = predict_total(team1, team2)
-                            message = (
-                                f"🎯 *Прогноз на тотал: {team1} vs {team2}*\n\n"
-                                f"• Сумма xG: {total_pred['total_xG']}\n"
-                                f"• Прогноз: *{total_pred['total_result']}*\n"
-                                f"• Уверенность: {total_pred['confidence']}"
+                                f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+                                f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
+                                f"📊 Владение: {match['possession']}\n"
+                                f"🎯 xG: {match['xG']}\n"
+                                f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
+                                f"📈 Тотал: {pred['total_pred']}"
                             )
                             send_message(chat_id, message, parse_mode='Markdown')
 
                     elif text == "/roi":
                         report = roi_tracker.report()
-                        history = roi_tracker.get_history()
                         message = (
                             f"📊 *Отчёт по ставкам*\n"
                             f"• Ставок: {report['total']}\n"
                             f"• Прибыль: {report['profit']} у.е.\n"
                             f"• Точность: {report['accuracy']}%\n"
-                            f"• ROI: {report['roi']}%\n\n"
-                            f"📋 *Последние ставки*:\n"
+                            f"• ROI: {report['roi']}%"
                         )
-                        for bet in history:
-                            message += f"  {bet['match']}: {bet['result']} ({bet['profit']} у.е.)\n"
                         send_message(chat_id, message, parse_mode='Markdown')
 
-                    elif text == "/subscribe":
-                        send_message(chat_id, "💳 Подписка: 499₽/мес. Напиши @admin")
-
-            # Проверка матчей
-            if datetime.now().minute % 5 == 0:
-                check_upcoming_matches(roi_tracker)
-                time.sleep(60)
-            else:
-                time.sleep(30)
+            # Проверка live-матчей каждые 15 секунд
+            check_live_matches(roi_tracker)
 
         except Exception as e:
             logger.error(f"🚨 Ошибка: {e}")
             time.sleep(10)
 
-# === Веб-сервер (для Render) ===
+# === Веб-сервер ===
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — работает 24/7</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — LIVE-прогнозы активны</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('', port), Handler)
-    logger.info(f"�� Веб-сервер запущен на порту {port}")
+    logger.info(f"🌍 Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
 # === Запуск ===
