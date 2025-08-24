@@ -105,16 +105,19 @@ def load_schedule():
             'league': 'Premier League',
             'b365_h': 2.1,
             'b365_d': 3.4,
-            'b365_a': 3.6
+            'b365_a': 3.6,
+            'b365_o25': 2.0,
+            'b365_u25': 1.8
         }
     ]
 
-# === Прогноз с xG из Understat ===
+# === Прогноз матча (основной) ===
 def predict_match(team1, team2):
     u1 = get_understat_data(team1)
     u2 = get_understat_data(team2)
     xG1 = u1['xG_for'] * 0.7 + u2['xG_against'] * 0.3
     xG2 = u2['xG_for'] * 0.7 + u1['xG_against'] * 0.3
+    total_xG = xG1 + xG2
     if xG1 > xG2 + 0.3:
         result = f"Победа {team1}"
     elif xG2 > xG1 + 0.3:
@@ -124,7 +127,27 @@ def predict_match(team1, team2):
     return {
         'xG1': round(xG1, 2),
         'xG2': round(xG2, 2),
+        'total_xG': round(total_xG, 2),
         'result': result
+    }
+
+# === Прогноз тотала (over/under 2.5) ===
+def predict_total(team1, team2):
+    pred = predict_match(team1, team2)
+    total_xG = pred['total_xG']
+    if total_xG > 2.7:
+        total_result = "Over 2.5"
+        confidence = "Высокая"
+    elif total_xG > 2.3:
+        total_result = "Over 2.5"
+        confidence = "Средняя"
+    else:
+        total_result = "Under 2.5"
+        confidence = "Высокая"
+    return {
+        'total_result': total_result,
+        'total_xG': pred['total_xG'],
+        'confidence': confidence
     }
 
 # === Отправка сообщения ===
@@ -157,6 +180,7 @@ def check_upcoming_matches(roi_tracker):
     for match in matches:
         if now + timedelta(minutes=50) < match['datetime'] <= now + timedelta(minutes=70):
             pred = predict_match(match['home'], match['away'])
+            total_pred = predict_total(match['home'], match['away'])
             bookie_probs = {
                 'H': 1 / match['b365_h'],
                 'D': 1 / match['b365_d'],
@@ -173,14 +197,15 @@ def check_upcoming_matches(roi_tracker):
                 f"{match['home']} ⚔️ {match['away']}\n\n"
                 f"🔮 *Прогноз AI*:\n"
                 f"• Победитель: *{pred['result']}*\n"
-                f"• xG: {pred['xG1']} — {pred['xG2']}\n\n"
+                f"• xG: {pred['xG1']} — {pred['xG2']}\n"
+                f"• Сумма xG: {pred['total_xG']}\n"
+                f"• Тотал: *{total_pred['total_result']}* ({total_pred['confidence']} уверенность)\n\n"
                 f"📘 *B365*: H{match['b365_h']} D{match['b365_d']} A{match['b365_a']}"
             )
 
             if signals:
                 signal_str = " | ".join([{'H': match['home'], 'D': 'Ничья', 'A': match['away']}[s] for s in signals])
                 message += f"\n\n🎯 *СИГНАЛ НА СТАВКУ!* 🔥\nВысокий перевес: {signal_str}"
-                # Симуляция ставки
                 odds = {'H': match['b365_h'], 'D': match['b365_d'], 'A': match['b365_a']}[signals[0]]
                 roi_tracker.place_bet(amount=10, odds=odds, win=True, match=f"{match['home']} vs {match['away']}")
 
@@ -208,11 +233,11 @@ def run_bot():
                         if is_subscriber(chat_id):
                             send_message(chat_id, "👋 Привет! У тебя есть доступ к прогнозам.")
                         else:
-                            send_message(chat_id, "�� Привет! Напиши /trial, чтобы получить 14 дней бесплатно.")
+                            send_message(chat_id, "👋 Привет! Напиши /trial, чтобы получить 14 дней бесплатно.")
 
                     elif text == "/trial":
                         if add_free_trial(chat_id):
-                            send_message(chat_id, "🎉 Ты получил 14 дней бесплатного доступа! Используй /predict")
+                            send_message(chat_id, "🎉 Ты получил 14 дней бесплатного доступа! Используй /predict или /total")
                         else:
                             send_message(chat_id, "❌ Ты уже использовал бесплатный период.")
 
@@ -224,7 +249,21 @@ def run_bot():
                             message = (
                                 f"🔮 *Прогноз: {team1} vs {team2}*\n\n"
                                 f"🎯 xG: {pred['xG1']} — {pred['xG2']}\n"
+                                f"📊 Сумма xG: {pred['total_xG']}\n"
                                 f"🏆 Исход: *{pred['result']}*"
+                            )
+                            send_message(chat_id, message, parse_mode='Markdown')
+
+                    elif text.startswith("/total") and is_subscriber(chat_id):
+                        args = text.split()[1:]
+                        if len(args) >= 2:
+                            team1, team2 = args[0], " ".join(args[1:])
+                            total_pred = predict_total(team1, team2)
+                            message = (
+                                f"🎯 *Прогноз на тотал: {team1} vs {team2}*\n\n"
+                                f"• Сумма xG: {total_pred['total_xG']}\n"
+                                f"• Прогноз: *{total_pred['total_result']}*\n"
+                                f"• Уверенность: {total_pred['confidence']}"
                             )
                             send_message(chat_id, message, parse_mode='Markdown')
 
@@ -268,7 +307,7 @@ class Handler(BaseHTTPRequestHandler):
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('', port), Handler)
-    logger.info(f"🌍 Веб-сервер запущен на порту {port}")
+    logger.info(f"�� Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
 # === Запуск ===
