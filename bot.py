@@ -38,57 +38,85 @@ def add_push_subscriber(chat_id):
         return True
     return False
 
-# === Загрузка live-матчей с SofaScore через прокси ===
+# === Загрузка live-матчей с SofaScore через публичный JSON ===
 def get_sofascore_live():
-    url = "https://api-pub.sb.scoreticker.com/api/v1/sport/football/events/live"
+    # Прямая ссылка на live-матчи
+    url = "https://www.sofascore.com/api/v1/sport/football/events/live"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'Accept': 'application/json',
         'Referer': 'https://www.sofascore.com/',
         'Origin': 'https://www.sofascore.com',
-        'Sec-Fetch-Site': 'same-origin',
-        'Connection': 'keep-alive'
+        'Sec-Fetch-Site': 'same-origin'
     }
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             matches = []
-            for event in data.get('events', []):
+            for event in data['events']:
                 try:
                     home = event['homeTeam']['name']
                     away = event['awayTeam']['name']
                     score = f"{event['homeScore']['current']}:{event['awayScore']['current']}"
                     minute = event['minute']
                     status = event['status']['type']
-                    if status in ["live", "paused"]:
+                    tournament = event['tournament']['name']
+
+                    if status == "inprogress":
                         match_data = {
                             'home': home,
                             'away': away,
                             'score': score,
                             'minute': minute,
+                            'tournament': tournament,
                             'status': status
                         }
+                        # xG (если есть)
                         if 'xG' in event:
                             match_data['xG_home'] = round(event['xG']['home'], 2)
                             match_data['xG_away'] = round(event['xG']['away'], 2)
-                        if 'statistics' in event:
-                            for stat in event['statistics']:
-                                if stat['type'] == 'possession':
-                                    match_data['possession'] = f"{stat['home']}% - {stat['away']}%"
-                                elif stat['type'] == 'attacks':
-                                    match_data['attacks'] = f"{stat['home']} - {stat['away']}"
-                                elif stat['type'] == 'dangerous_attacks':
-                                    match_data['danger_attacks'] = f"{stat['home']} - {stat['away']}"
                         matches.append(match_data)
-                except: continue
+                except KeyError:
+                    continue
             return matches
         else:
-            logger.error(f"❌ Ошибка SofaScore: {response.status_code}")
+            logger.error(f"❌ Ошибка: {response.status_code}")
             return []
     except Exception as e:
-        logger.error(f"❌ Ошибка запроса: {e}")
-        return []
+        # Если основной URL не работает — используем зеркало
+        try:
+            mirror_url = "https://sofascore.p.rapidapi.com/v1/events/live"
+            headers = {
+                'x-rapidapi-host': 'sofascore.p.rapidapi.com',
+                'x-rapidapi-key': '031e6720d6mshf680489e88863f3p187a57jsn6485882e5916'
+            }
+            response = requests.get(mirror_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                matches = []
+                for event in data['data']:
+                    home = event['homeTeam']['name']
+                    away = event['awayTeam']['name']
+                    score = f"{event['homeScore']['current']}:{event['awayScore']['current']}"
+                    minute = event['minute']
+                    match_data = {
+                        'home': home,
+                        'away': away,
+                        'score': score,
+                        'minute': minute,
+                        'tournament': 'Football',
+                        'status': 'live'
+                    }
+                    if 'xg' in event:
+                        match_data['xG_home'] = round(event['xg']['home'], 2)
+                        match_data['xG_away'] = round(event['xg']['away'], 2)
+                    matches.append(match_data)
+                return matches
+        except:
+            logger.error("❌ Все источники недоступны")
+            return []
+    return []
 
 # === Прогноз в live-матче ===
 def predict_live_match(match):
@@ -98,6 +126,7 @@ def predict_live_match(match):
     total_xG = xG1 + xG2
     adj_xG1 = xG1 + (score1 * 0.5)
     adj_xG2 = xG2 + (score2 * 0.5)
+
     if adj_xG1 > adj_xG2 + 0.5:
         winner = match['home']
         confidence = "Высокая"
@@ -107,6 +136,7 @@ def predict_live_match(match):
     else:
         winner = "Ничья"
         confidence = "Средняя"
+
     total_pred = "Over 2.5" if total_xG > 2.7 else "Under 2.5"
     return {
         'winner': winner,
@@ -114,43 +144,6 @@ def predict_live_match(match):
         'total_pred': total_pred,
         'adj_xG': f"{adj_xG1:.2f} — {adj_xG2:.2f}"
     }
-
-# === ROI-трекер ===
-class ROI_Tracker:
-    def __init__(self):
-        self.total_bet = 0
-        self.profit = 0
-        self.wins = 0
-        self.total = 0
-        self.history = []
-
-    def place_bet(self, amount=10, odds=1.8, win=True, match="Unknown"):
-        self.total += 1
-        self.total_bet += amount
-        result = "Выигрыш" if win else "Проигрыш"
-        if win:
-            self.profit += amount * (odds - 1)
-            self.wins += 1
-        else:
-            self.profit -= amount
-        self.history.append({
-            'match': match,
-            'amount': amount,
-            'odds': odds,
-            'result': result,
-            'profit': round(amount * (odds - 1) if win else -amount, 2),
-            'date': time.strftime('%d.%m %H:%M')
-        })
-
-    def report(self):
-        accuracy = self.wins / self.total if self.total else 0
-        roi = (self.profit / self.total_bet) * 100 if self.total_bet else 0
-        return {
-            'total': self.total,
-            'profit': round(self.profit, 1),
-            'accuracy': round(accuracy * 100, 1),
-            'roi': round(roi, 1)
-        }
 
 # === Отправка сообщения в Telegram ===
 def send_message(chat_id, text, parse_mode=None):
@@ -176,22 +169,21 @@ def get_updates(offset=None):
         return {"ok": False}
 
 # === Проверка live-матчей ===
-def check_live_matches_with_push(roi_tracker):
+def check_live_matches_with_push():
     matches = get_sofascore_live()
     if not matches:
-        logger.info("🔴 Нет live-матчей")
+        logger.info("🔴 Нет live-матчей или ошибка соединения")
         return
 
     for match in matches:
         pred = predict_live_match(match)
         message = (
             f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+            f"🏆 {match['tournament']}\n"
             f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
         )
         if 'xG_home' in match:
             message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
-        if 'possession' in match:
-            message += f"�� Владение: {match['possession']}\n"
         message += (
             f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
             f"📈 Тотал: *{pred['total_pred']}*"
@@ -202,7 +194,6 @@ def check_live_matches_with_push(roi_tracker):
 def run_bot():
     logger.info("✅ Бот запущен — ожидаем команды...")
     offset = None
-    roi_tracker = ROI_Tracker()
 
     while True:
         try:
@@ -216,7 +207,7 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Live-матчи с SofaScore работают.")
+                        send_message(chat_id, "👋 Привет! Live-матчи работают без API.")
 
                     elif text == "/live":
                         matches = get_sofascore_live()
@@ -231,39 +222,27 @@ def run_bot():
                                 )
                                 if 'xG_home' in match:
                                     message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
-                                if 'possession' in match:
-                                    message += f"📊 Владение: {match['possession']}\n"
                                 message += (
                                     f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
                                     f"📈 Тотал: *{pred['total_pred']}*"
                                 )
                                 send_message(chat_id, message, parse_mode='Markdown')
 
-                    elif text == "/roi":
-                        report = roi_tracker.report()
-                        message = (
-                            f"📊 *Отчёт по ставкам*\n"
-                            f"• Ставок: {report['total']}\n"
-                            f"• Прибыль: {report['profit']} у.е.\n"
-                            f"• Точность: {report['accuracy']}%\n"
-                            f"• ROI: {report['roi']}%"
-                        )
-                        send_message(chat_id, message, parse_mode='Markdown')
-
-            check_live_matches_with_push(roi_tracker)
+            # Проверка каждые 30 секунд
+            check_live_matches_with_push()
             time.sleep(30)
 
         except Exception as e:
             logger.error(f"🚨 Ошибка: {e}")
             time.sleep(10)
 
-# === Веб-сервер ===
+# === Веб-сервер для Render ===
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — Live-матчи с SofaScore</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Live-матчи без API</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -271,7 +250,7 @@ def run_web():
     logger.info(f"🌍 Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
-# === Запуск ===
+# === Запуск бота и веба ===
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web, daemon=True)
     web_thread.start()
