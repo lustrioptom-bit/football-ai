@@ -47,8 +47,6 @@ def add_free_trial(chat_id):
 
 # === Загрузка данных из Understat (реальные xG) ===
 def get_understat_data(team_name):
-    # Пример: https://understat.com/team/Arsenal/2023
-    # Упрощённый JSON (в реальности — парсинг)
     understat_mock = {
         'Arsenal': {'xG_for': 2.1, 'xG_against': 0.9, 'form': 7.2},
         'Man City': {'xG_for': 2.5, 'xG_against': 0.7, 'form': 8.1},
@@ -58,7 +56,6 @@ def get_understat_data(team_name):
 
 # === Загрузка календаря матчей ===
 def load_schedule():
-    # В реальности — из API или CSV
     return [
         {
             'home': 'Arsenal',
@@ -187,7 +184,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"<h1>AI Football Analyst — работает 24/7</h1>")
+        # Исправлено: строка кодируется в UTF-8
+        self.wfile.write("<h1>AI Football Analyst — работает 24/7</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
