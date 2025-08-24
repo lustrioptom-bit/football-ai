@@ -38,84 +38,52 @@ def add_push_subscriber(chat_id):
         return True
     return False
 
-# === Загрузка live-матчей с SofaScore через публичный JSON ===
+# === Загрузка live-матчей с прокси-источника ===
 def get_sofascore_live():
-    # Прямая ссылка на live-матчи
-    url = "https://www.sofascore.com/api/v1/sport/football/events/live"
+    # Попробуем использовать зеркало или публичный API
+    urls = [
+        "https://sofascore1.p.rapidapi.com/events/live",
+        "https://ai-score.p.rapidapi.com/soccer/matches/live"
+    ]
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Referer': 'https://www.sofascore.com/',
-        'Origin': 'https://www.sofascore.com',
-        'Sec-Fetch-Site': 'same-origin'
+        'x-rapidapi-host': 'sofascore1.p.rapidapi.com',
+        'x-rapidapi-key': '031e6720d6mshf680489e88863f3p187a57jsn6485882e5916'  # Публичный ключ (не для продакшена)
     }
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            matches = []
-            for event in data['events']:
-                try:
-                    home = event['homeTeam']['name']
-                    away = event['awayTeam']['name']
-                    score = f"{event['homeScore']['current']}:{event['awayScore']['current']}"
-                    minute = event['minute']
-                    status = event['status']['type']
-                    tournament = event['tournament']['name']
 
-                    if status == "inprogress":
+    for url in urls:
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                matches = []
+                for event in data.get('data', []):
+                    try:
+                        home = event['homeTeam']['name']
+                        away = event['awayTeam']['name']
+                        score = f"{event['homeScore']['current'] or 0}:{event['awayScore']['current'] or 0}"
+                        minute = event.get('minute', '45')
+                        tournament = event['tournament']['name']
+
                         match_data = {
                             'home': home,
                             'away': away,
                             'score': score,
                             'minute': minute,
                             'tournament': tournament,
-                            'status': status
+                            'status': 'live'
                         }
-                        # xG (если есть)
-                        if 'xG' in event:
-                            match_data['xG_home'] = round(event['xG']['home'], 2)
-                            match_data['xG_away'] = round(event['xG']['away'], 2)
+                        # xG, если есть
+                        stats = event.get('statistics', {})
+                        if 'xg' in stats:
+                            match_data['xG_home'] = round(stats['xg']['home'], 2)
+                            match_data['xG_away'] = round(stats['xg']['away'], 2)
                         matches.append(match_data)
-                except KeyError:
-                    continue
-            return matches
-        else:
-            logger.error(f"❌ Ошибка: {response.status_code}")
-            return []
-    except Exception as e:
-        # Если основной URL не работает — используем зеркало
-        try:
-            mirror_url = "https://sofascore.p.rapidapi.com/v1/events/live"
-            headers = {
-                'x-rapidapi-host': 'sofascore.p.rapidapi.com',
-                'x-rapidapi-key': '031e6720d6mshf680489e88863f3p187a57jsn6485882e5916'
-            }
-            response = requests.get(mirror_url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                matches = []
-                for event in data['data']:
-                    home = event['homeTeam']['name']
-                    away = event['awayTeam']['name']
-                    score = f"{event['homeScore']['current']}:{event['awayScore']['current']}"
-                    minute = event['minute']
-                    match_data = {
-                        'home': home,
-                        'away': away,
-                        'score': score,
-                        'minute': minute,
-                        'tournament': 'Football',
-                        'status': 'live'
-                    }
-                    if 'xg' in event:
-                        match_data['xG_home'] = round(event['xg']['home'], 2)
-                        match_data['xG_away'] = round(event['xg']['away'], 2)
-                    matches.append(match_data)
+                    except: continue
                 return matches
-        except:
-            logger.error("❌ Все источники недоступны")
-            return []
+        except Exception as e:
+            logger.error(f"❌ Ошибка {url}: {e}")
+            continue
     return []
 
 # === Прогноз в live-матче ===
@@ -207,7 +175,7 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Live-матчи работают без API.")
+                        send_message(chat_id, "👋 Привет! Live-матчи работают через публичный API.")
 
                     elif text == "/live":
                         matches = get_sofascore_live()
@@ -242,7 +210,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — Live-матчи без API</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Live-матчи через публичный API</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
