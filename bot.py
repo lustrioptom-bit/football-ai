@@ -11,7 +11,10 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Конфиг
+# === ТВОЙ API-КЛЮЧ ===
+RAPIDAPI_KEY = "95f7d440379e618f7b4a78b7b51d245d"
+
+# Конфиг Telegram
 TOKEN = "8304903389:AAGRyWP4Ez97aoA-yLTYzYLQHuKbutTfcy4"
 MAIN_CHAT_ID = "8431596511"
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
@@ -38,38 +41,35 @@ def add_push_subscriber(chat_id):
         return True
     return False
 
-# === Загрузка live-матчей с AiScore через публичный API ===
-def get_aiscore_live():
-    # Попробуем использовать публичный API AiScore
-    url = "https://api.aiscore.com/api/v1/sport/football/events/live"
+# === Загрузка live-матчей с API-Football (RapidAPI) ===
+def get_live_matches():
+    url = "https://v3.football.api-sports.io/fixtures?live=all"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Referer': 'https://www.aiscore.com/',
-        'Origin': 'https://www.aiscore.com',
-        'Sec-Fetch-Site': 'same-origin'
+        'x-rapidapi-host': 'v3.football.api-sports.io',
+        'x-rapidapi-key': RAPIDAPI_KEY
     }
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             matches = []
-            for event in data['events']:
+            for event in data['response']:
                 try:
-                    home = event['homeTeam']['name']
-                    away = event['awayTeam']['name']
-                    score = f"{event['homeScore']['current']}:{event['awayScore']['current']}"
-                    minute = event['minute']
-                    status = event['status']['type']
-                    tournament = event['tournament']['name']
+                    fixture = event['fixture']
+                    teams = event['teams']
+                    goals = event['goals']
+                    score = f"{goals['home'] or 0}:{goals['away'] or 0}"
+                    league = event['league']['name']
+                    status = fixture['status']['short']
+                    minute = fixture['status']['elapsed']
 
-                    if status == "inprogress":
+                    if status in ['1H', '2H', 'ET', 'P']:
                         match_data = {
-                            'home': home,
-                            'away': away,
+                            'home': teams['home']['name'],
+                            'away': teams['away']['name'],
                             'score': score,
                             'minute': minute,
-                            'tournament': tournament,
+                            'league': league,
                             'status': status
                         }
                         # xG (если есть)
@@ -77,11 +77,12 @@ def get_aiscore_live():
                             match_data['xG_home'] = round(event['xG']['home'], 2)
                             match_data['xG_away'] = round(event['xG']['away'], 2)
                         matches.append(match_data)
-                except KeyError:
+                except Exception as e:
+                    logger.warning(f"Пропущен матч: {e}")
                     continue
             return matches
         else:
-            logger.error(f"❌ Ошибка: {response.status_code}")
+            logger.error(f"❌ Ошибка API-Football: {response.status_code} — {response.text}")
             return []
     except Exception as e:
         logger.error(f"❌ Ошибка запроса: {e}")
@@ -137,27 +138,28 @@ def get_updates(offset=None):
         logger.error(f"❌ Ошибка: {e}")
         return {"ok": False}
 
-# === Проверка live-матчей ===
+# === Проверка live-матчей и push-уведомлений ===
 def check_live_matches_with_push():
-    matches = get_aiscore_live()
+    matches = get_live_matches()
     if not matches:
-        logger.info("🔴 Нет live-матчей или ошибка соединения")
+        logger.info("🔴 Нет live-матчей или ошибка API")
         return
 
     for match in matches:
         pred = predict_live_match(match)
         message = (
             f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
-            f"🏆 {match['tournament']}\n"
+            f"🏆 {match['league']}\n"
             f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
         )
         if 'xG_home' in match:
             message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
         message += (
-            f"�� Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
+            f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
             f"📈 Тотал: *{pred['total_pred']}*"
         )
         send_message(MAIN_CHAT_ID, message, parse_mode='Markdown')
+        logger.info(f"🔔 LIVE: {match['home']} vs {match['away']} — {match['score']}")
 
 # === Основной цикл бота ===
 def run_bot():
@@ -176,10 +178,10 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Live-матчи работают через AiScore.")
+                        send_message(chat_id, "👋 Привет! Live-матчи подключены через API-Football.")
 
                     elif text == "/live":
-                        matches = get_aiscore_live()
+                        matches = get_live_matches()
                         if not matches:
                             send_message(chat_id, "🔴 Сейчас нет live-матчей.")
                         else:
@@ -187,6 +189,7 @@ def run_bot():
                                 pred = predict_live_match(match)
                                 message = (
                                     f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+                                    f"🏆 {match['league']}\n"
                                     f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
                                 )
                                 if 'xG_home' in match:
@@ -211,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — Live-матчи с AiScore</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Live-матчи через API-Football</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
