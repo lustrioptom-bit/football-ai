@@ -7,6 +7,7 @@ import pandas as pd
 from io import StringIO
 from datetime import datetime, timedelta
 import logging
+import time  # ✅ Это было пропущено!
 
 # Настройка
 logging.basicConfig(level=logging.INFO)
@@ -58,18 +59,6 @@ def predict_match(team1, team2, df):
         'result': result
     }
 
-# === Сравнение с букмекерами ===
-def compare_with_bookmaker(ai_probs, b365_h, b365_d, b365_a):
-    implied = {
-        'H': 1 / b365_h,
-        'D': 1 / b365_d,
-        'A': 1 / b365_a
-    }
-    total = sum(implied.values())
-    bookie_probs = {k: v / total for k, v in implied.items()}
-    edge = {k: ai_probs[k] - bookie_probs[k] for k in ai_probs}
-    return bookie_probs, edge
-
 # === ROI-трекер ===
 class ROI_Tracker:
     def __init__(self):
@@ -81,8 +70,7 @@ class ROI_Tracker:
     def place_bet(self, amount=10, win_prob=0.5, odds=1.8):
         self.total += 1
         self.total_bet += amount
-        # Симуляция: 50% шанс победы
-        win = True
+        win = True  # Упрощение
         if win:
             self.profit += amount * (odds - 1)
             self.wins += 1
@@ -157,7 +145,7 @@ def run_bot():
                                 f"🔮 *Прогноз: {team1} vs {team2}*\n\n"
                                 f"🎯 xG: {pred['xG1']} — {pred['xG2']}\n"
                                 f"📌 Счёт: {pred['score']}\n"
-                                f"�� Исход: *{pred['result']}*"
+                                f"🏆 Исход: *{pred['result']}*"
                             )
                             send_message(chat_id, message, parse_mode='Markdown')
 
@@ -173,7 +161,7 @@ def run_bot():
                         )
                         send_message(chat_id, message, parse_mode='Markdown')
 
-            # Проверка матчей каждые 5 минут
+            # Проверка каждые 5 минут
             if datetime.now().minute % 5 == 0:
                 time.sleep(60)
             else:
@@ -186,7 +174,7 @@ def run_bot():
             logger.error(f"🚨 Ошибка: {e}")
             time.sleep(10)
 
-# === Веб-сервер для Render (слушает порт 10000) ===
+# === Веб-сервер для Render ===
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
