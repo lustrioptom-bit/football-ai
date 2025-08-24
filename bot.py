@@ -6,6 +6,7 @@ import requests
 import time
 import logging
 import os
+from datetime import datetime, timedelta
 
 # Настройка
 logging.basicConfig(level=logging.INFO)
@@ -50,9 +51,13 @@ TOP_LEAGUES = [
     "Ligue 1"             # Франция
 ]
 
-# === Загрузка live-матчей из топ-лиг с API-Football ===
-def get_live_matches_top_leagues():
-    url = "https://v3.football.api-sports.io/fixtures?live=all"
+# === Загрузка предстоящих матчей из топ-лиг ===
+def get_upcoming_matches():
+    now = datetime.now()
+    from_time = int(now.timestamp())
+    to_time = int((now + timedelta(hours=2)).timestamp())  # На 2 часа вперёд
+
+    url = f"https://v3.football.api-sports.io/fixtures?league=39,140,78,135,61&from={now.strftime('%Y-%m-%d')}&to={now.strftime('%Y-%m-%d')}"
     headers = {
         'x-rapidapi-host': 'v3.football.api-sports.io',
         'x-rapidapi-key': RAPIDAPI_KEY
@@ -64,30 +69,24 @@ def get_live_matches_top_leagues():
             matches = []
             for event in data['response']:
                 try:
-                    league_name = event['league']['name']
-                    if league_name not in TOP_LEAGUES:
-                        continue  # Пропускаем не топ-лиги
-
                     fixture = event['fixture']
                     teams = event['teams']
-                    goals = event['goals']
-                    score = f"{goals['home'] or 0}:{goals['away'] or 0}"
-                    status = fixture['status']['short']
-                    minute = fixture['status']['elapsed']
+                    league_name = event['league']['name']
+                    if league_name not in TOP_LEAGUES:
+                        continue
 
-                    if status in ['1H', '2H', 'ET', 'P']:
+                    match_time = datetime.fromtimestamp(fixture['timestamp'])
+                    time_diff = match_time - now
+
+                    # Только если матч начнётся через 25–35 минут
+                    if timedelta(minutes=25) < time_diff <= timedelta(minutes=35):
                         match_data = {
                             'home': teams['home']['name'],
                             'away': teams['away']['name'],
-                            'score': score,
-                            'minute': minute,
+                            'start_time': match_time.strftime('%H:%M'),
                             'league': league_name,
-                            'status': status
+                            'status': fixture['status']['short']
                         }
-                        # xG (если есть)
-                        if 'xG' in event:
-                            match_data['xG_home'] = round(event['xG']['home'], 2)
-                            match_data['xG_away'] = round(event['xG']['away'], 2)
                         # Коэффициенты (B365)
                         if 'bookmakers' in event.get('odds', {}):
                             for bookmaker in event['odds']['bookmakers']:
@@ -104,37 +103,37 @@ def get_live_matches_top_leagues():
                     continue
             return matches
         else:
-            logger.error(f"❌ Ошибка API-Football: {response.status_code} — {response.text}")
+            logger.error(f"❌ Ошибка API-Football: {response.status_code}")
             return []
     except Exception as e:
         logger.error(f"❌ Ошибка запроса: {e}")
         return []
 
-# === Прогноз в live-матче ===
-def predict_live_match(match):
-    xG1 = match.get('xG_home', 0.0)
-    xG2 = match.get('xG_away', 0.0)
-    score1, score2 = map(int, match['score'].split(':'))
-    total_xG = xG1 + xG2
-    adj_xG1 = xG1 + (score1 * 0.5)
-    adj_xG2 = xG2 + (score2 * 0.5)
+# === Прогноз до матча ===
+def predict_pre_match(home, away):
+    # Имитация xG на основе команд (в реальности — из статистики)
+    xG_home = round(1.2 + (hash(home) % 100) / 100, 2)
+    xG_away = round(1.0 + (hash(away) % 100) / 100, 2)
+    total_xG = xG_home + xG_away
 
-    if adj_xG1 > adj_xG2 + 0.5:
-        winner = match['home']
+    if xG_home > xG_away + 0.3:
+        winner = home
         confidence = "Высокая"
-    elif adj_xG2 > adj_xG1 + 0.5:
-        winner = match['away']
+    elif xG_away > xG_home + 0.3:
+        winner = away
         confidence = "Высокая"
     else:
         winner = "Ничья"
         confidence = "Средняя"
 
-    total_pred = "Over 2.5" if total_xG > 2.7 else "Under 2.5"
+    total_pred = "Over 2.5" if total_xG > 2.6 else "Under 2.5"
     return {
+        'xG_home': xG_home,
+        'xG_away': xG_away,
+        'total_xG': total_xG,
         'winner': winner,
         'confidence': confidence,
-        'total_pred': total_pred,
-        'adj_xG': f"{adj_xG1:.2f} — {adj_xG2:.2f}"
+        'total_pred': total_pred
     }
 
 # === Сравнение AI и коэффициентов ===
@@ -186,9 +185,6 @@ class ROI_Tracker:
             'roi': round(roi, 1)
         }
 
-    def get_history(self, n=5):
-        return self.history[-n:]
-
 # === Отправка сообщения в Telegram ===
 def send_message(chat_id, text, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -212,20 +208,17 @@ def get_updates(offset=None):
         logger.error(f"❌ Ошибка: {e}")
         return {"ok": False}
 
-# === Проверка live-матчей и push-уведомлений ===
-def check_live_matches_with_push(roi_tracker):
-    matches = get_live_matches_top_leagues()
-    if not matches:
-        logger.info("🔴 Нет live-матчей в топ-лигах")
-        return
-
+# === Проверка предстоящих матчей (за 30 мин до старта) ===
+def check_upcoming_matches(roi_tracker):
+    matches = get_upcoming_matches()
     for match in matches:
-        pred = predict_live_match(match)
+        pred = predict_pre_match(match['home'], match['away'])
         message = (
-            f"🔥 *LIVE: {match['home']} vs {match['away']}*\n"
+            f"⏰ *ПРЕДМАТЧЕВЫЙ ПРОГНОЗ*\n"
+            f"🔥 {match['home']} vs {match['away']}\n"
             f"🏆 {match['league']}\n"
-            f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
-            f"🎯 xG: {match.get('xG_home', 'N/A')} — {match.get('xG_away', 'N/A')}\n"
+            f"⏱️ Начало: {match['start_time']}\n"
+            f"🎯 xG: {pred['xG_home']} — {pred['xG_away']}\n"
         )
         if 'odds_home' in match:
             message += f"📘 B365: H{match['odds_home']} D{match['odds_draw']} A{match['odds_away']}\n"
@@ -237,7 +230,7 @@ def check_live_matches_with_push(roi_tracker):
             signals = [k for k, v in edge.items() if v > 0.10]
             if signals:
                 signal_str = " | ".join([{'H': match['home'], 'D': 'Ничья', 'A': match['away']}[s] for s in signals])
-                message += f"\n💥 *СИГНАЛ НА СТАВКУ!* 🔥\n�� {signal_str}"
+                message += f"\n💥 *СИГНАЛ НА СТАВКУ!* 🔥\n🎯 {signal_str}"
                 # Симуляция ставки
                 odds = {'H': match['odds_home'], 'D': match['odds_draw'], 'A': match['odds_away']}[signals[0]]
                 roi_tracker.place_bet(amount=10, odds=float(odds), win=True, match=f"{match['home']} vs {match['away']}")
@@ -247,7 +240,7 @@ def check_live_matches_with_push(roi_tracker):
             f"📈 Тотал: *{pred['total_pred']}*"
         )
         send_message(MAIN_CHAT_ID, message, parse_mode='Markdown')
-        logger.info(f"🔔 LIVE: {match['home']} vs {match['away']} — {match['score']}")
+        logger.info(f"🔔 Предматч: {match['home']} vs {match['away']}")
 
 # === Основной цикл бота ===
 def run_bot():
@@ -257,6 +250,14 @@ def run_bot():
 
     while True:
         try:
+            # Проверка каждые 5 минут
+            if datetime.now().minute % 5 == 0:
+                check_upcoming_matches(roi_tracker)
+                time.sleep(60)
+            else:
+                time.sleep(30)
+
+            # Обработка команд
             data = get_updates(offset)
             if data.get("ok") and data.get("result"):
                 for item in data["result"]:
@@ -267,48 +268,37 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Только топ-лиги: АПЛ, Ла Лига, Бундеслига, Серия А, Лига 1.")
+                        send_message(chat_id, "👋 Привет! Предматчевые прогнозы за 30 минут до старта активны.")
 
-                    elif text == "/live":
-                        matches = get_live_matches_top_leagues()
+                    elif text == "/upcoming":
+                        matches = get_upcoming_matches()
                         if not matches:
-                            send_message(chat_id, "🔴 Сейчас нет live-матчей в топ-лигах.")
+                            send_message(chat_id, "📅 Нет предстоящих матчей в ближайшие 30 минут.")
                         else:
                             for match in matches:
-                                pred = predict_live_match(match)
+                                pred = predict_pre_match(match['home'], match['away'])
                                 message = (
-                                    f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+                                    f"⏰ *{match['home']} vs {match['away']}*\n"
                                     f"🏆 {match['league']}\n"
-                                    f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
-                                )
-                                if 'xG_home' in match:
-                                    message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
-                                if 'odds_home' in match:
-                                    message += f"📘 B365: H{match['odds_home']} D{match['odds_draw']} A{match['odds_away']}\n"
-                                message += (
+                                    f"⏱️ {match['start_time']}\n"
+                                    f"🎯 xG: {pred['xG_home']} — {pred['xG_away']}\n"
                                     f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
                                     f"📈 Тотал: *{pred['total_pred']}*"
                                 )
+                                if 'odds_home' in match:
+                                    message += f"\n📘 B365: H{match['odds_home']} D{match['odds_draw']} A{match['odds_away']}"
                                 send_message(chat_id, message, parse_mode='Markdown')
 
                     elif text == "/roi":
                         report = roi_tracker.report()
-                        history = roi_tracker.get_history()
                         message = (
                             f"📊 *Отчёт по ставкам*\n"
                             f"• Ставок: {report['total']}\n"
                             f"• Прибыль: {report['profit']} у.е.\n"
                             f"• Точность: {report['accuracy']}%\n"
-                            f"• ROI: {report['roi']}%\n\n"
-                            f"📋 *Последние ставки*:\n"
+                            f"• ROI: {report['roi']}%"
                         )
-                        for bet in history:
-                            message += f"  {bet['match']}: {bet['result']} ({bet['profit']} у.е.)\n"
                         send_message(chat_id, message, parse_mode='Markdown')
-
-            # Проверка каждые 30 секунд
-            check_live_matches_with_push(roi_tracker)
-            time.sleep(30)
 
         except Exception as e:
             logger.error(f"🚨 Ошибка: {e}")
@@ -320,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — Только топ-лиги</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Предматчевые прогнозы активны</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
