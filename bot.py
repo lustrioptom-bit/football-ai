@@ -41,8 +41,17 @@ def add_push_subscriber(chat_id):
         return True
     return False
 
-# === Загрузка live-матчей и коэффициентов с API-Football ===
-def get_live_matches_with_odds():
+# === Список топ-лиг ===
+TOP_LEAGUES = [
+    "Premier League",     # Англия
+    "La Liga",            # Испания
+    "Bundesliga",         # Германия
+    "Serie A",            # Италия
+    "Ligue 1"             # Франция
+]
+
+# === Загрузка live-матчей из топ-лиг с API-Football ===
+def get_live_matches_top_leagues():
     url = "https://v3.football.api-sports.io/fixtures?live=all"
     headers = {
         'x-rapidapi-host': 'v3.football.api-sports.io',
@@ -55,11 +64,14 @@ def get_live_matches_with_odds():
             matches = []
             for event in data['response']:
                 try:
+                    league_name = event['league']['name']
+                    if league_name not in TOP_LEAGUES:
+                        continue  # Пропускаем не топ-лиги
+
                     fixture = event['fixture']
                     teams = event['teams']
                     goals = event['goals']
                     score = f"{goals['home'] or 0}:{goals['away'] or 0}"
-                    league = event['league']['name']
                     status = fixture['status']['short']
                     minute = fixture['status']['elapsed']
 
@@ -69,7 +81,7 @@ def get_live_matches_with_odds():
                             'away': teams['away']['name'],
                             'score': score,
                             'minute': minute,
-                            'league': league,
+                            'league': league_name,
                             'status': status
                         }
                         # xG (если есть)
@@ -202,18 +214,18 @@ def get_updates(offset=None):
 
 # === Проверка live-матчей и push-уведомлений ===
 def check_live_matches_with_push(roi_tracker):
-    matches = get_live_matches_with_odds()
+    matches = get_live_matches_top_leagues()
     if not matches:
-        logger.info("🔴 Нет live-матчей или ошибка API")
+        logger.info("🔴 Нет live-матчей в топ-лигах")
         return
 
     for match in matches:
         pred = predict_live_match(match)
         message = (
-            f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
+            f"🔥 *LIVE: {match['home']} vs {match['away']}*\n"
             f"🏆 {match['league']}\n"
             f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
-            f"�� xG: {match.get('xG_home', 'N/A')} — {match.get('xG_away', 'N/A')}\n"
+            f"🎯 xG: {match.get('xG_home', 'N/A')} — {match.get('xG_away', 'N/A')}\n"
         )
         if 'odds_home' in match:
             message += f"📘 B365: H{match['odds_home']} D{match['odds_draw']} A{match['odds_away']}\n"
@@ -225,7 +237,7 @@ def check_live_matches_with_push(roi_tracker):
             signals = [k for k, v in edge.items() if v > 0.10]
             if signals:
                 signal_str = " | ".join([{'H': match['home'], 'D': 'Ничья', 'A': match['away']}[s] for s in signals])
-                message += f"🔥 *СИГНАЛ НА СТАВКУ!* ��\nВысокий перевес: {signal_str}"
+                message += f"\n💥 *СИГНАЛ НА СТАВКУ!* 🔥\n�� {signal_str}"
                 # Симуляция ставки
                 odds = {'H': match['odds_home'], 'D': match['odds_draw'], 'A': match['odds_away']}[signals[0]]
                 roi_tracker.place_bet(amount=10, odds=float(odds), win=True, match=f"{match['home']} vs {match['away']}")
@@ -255,12 +267,12 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Live-матчи, коэффициенты и ROI активны.")
+                        send_message(chat_id, "👋 Привет! Только топ-лиги: АПЛ, Ла Лига, Бундеслига, Серия А, Лига 1.")
 
                     elif text == "/live":
-                        matches = get_live_matches_with_odds()
+                        matches = get_live_matches_top_leagues()
                         if not matches:
-                            send_message(chat_id, "🔴 Сейчас нет live-матчей.")
+                            send_message(chat_id, "🔴 Сейчас нет live-матчей в топ-лигах.")
                         else:
                             for match in matches:
                                 pred = predict_live_match(match)
@@ -308,7 +320,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — Коэффициенты и ROI активны</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Только топ-лиги</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
