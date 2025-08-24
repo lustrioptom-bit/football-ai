@@ -19,77 +19,69 @@ TOKEN = "8304903389:AAGRyWP4Ez97aoA-yLTYzYLQHuKbutTfcy4"
 MAIN_CHAT_ID = "8431596511"
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 
-# === Подписчики на push-уведомления ===
-PUSH_SUBSCRIBERS_FILE = "push_subscribers.json"
-if not os.path.exists(PUSH_SUBSCRIBERS_FILE):
-    with open(PUSH_SUBSCRIBERS_FILE, "w") as f:
-        json.dump([MAIN_CHAT_ID], f)  # По умолчанию — главный чат
+# === Словарь лиг: код → название → страна ===
+LEAGUES = {
+    'E0': {'name': 'Premier League', 'country': 'Англия', 'url': 'https://www.football-data.co.uk/mmz4281/2324/E0.csv'},
+    'D1': {'name': 'Bundesliga', 'country': 'Германия', 'url': 'https://www.football-data.co.uk/mmz4281/2324/D1.csv'},
+    'F1': {'name': 'Ligue 1', 'country': 'Франция', 'url': 'https://www.football-data.co.uk/mmz4281/2324/F1.csv'},
+    'SP1': {'name': 'La Liga', 'country': 'Испания', 'url': 'https://www.football-data.co.uk/mmz4281/2324/SP1.csv'},
+    'I1': {'name': 'Serie A', 'country': 'Италия', 'url': 'https://www.football-data.co.uk/mmz4281/2324/I1.csv'},
+    'DED': {'name': 'Eredivisie', 'country': 'Нидерланды', 'url': 'https://www.football-data.co.uk/mmz4281/2324/DED.csv'},
+    'UCL': {'name': 'Premier League Ukraine', 'country': 'Украина', 'url': 'https://www.football-data.co.uk/mmz4281/2324/UCL.csv'}  # Условная ссылка
+}
 
-def load_push_subscribers():
-    try:
-        with open(PUSH_SUBSCRIBERS_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return [MAIN_CHAT_ID]
+# === Загрузка данных из всех лиг ===
+def load_data():
+    all_matches = []
+    for code, info in LEAGUES.items():
+        url = info['url']
+        try:
+            response = requests.get(url, timeout=10)
+            df = pd.read_csv(StringIO(response.text))
+            df['League'] = info['name']
+            df['Country'] = info['country']
+            df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+            all_matches.append(df)
+            logger.info(f"✅ {info['country']} — {info['name']} загружена")
+        except Exception as e:
+            logger.error(f"❌ {info['country']}: {e}")
+    return pd.concat(all_matches, ignore_index=True) if all_matches else pd.DataFrame()
 
-def add_push_subscriber(chat_id):
-    subs = load_push_subscribers()
-    if str(chat_id) not in [str(c) for c in subs]:
-        subs.append(str(chat_id))
-        with open(PUSH_SUBSCRIBERS_FILE, "w") as f:
-            json.dump(subs, f)
-        return True
-    return False
+# === Таблица лиги ===
+def get_league_table(df, league_name):
+    league_df = df[df['League'] == league_name]
+    if league_df.empty:
+        return pd.DataFrame()
 
-# === Live-матчи (симуляция) ===
-def get_live_matches():
-    return [
-        {
-            'home': 'Arsenal',
-            'away': 'Man City',
-            'score': '1:1',
-            'minute': 67,
-            'possession': '52% - 48%',
-            'shots': '12 - 9',
-            'shots_on_target': '5 - 4',
-            'xG': '1.8 - 1.5',
-            'danger_attacks': '65 - 58',
-            'yellow_cards': '2 - 3',
-            'red_cards': '0 - 1',
-            'status': 'LIVE',
-            'events': []  # События: голы, карточки
-        }
-    ]
+    table = {}
+    for _, row in league_df.iterrows():
+        h, a = row['HomeTeam'], row['AwayTeam']
+        for team, is_home in [(h, True), (a, False)]:
+            if team not in table:
+                table[team] = {'И': 0, 'В': 0, 'Н': 0, 'П': 0, 'РГ': 0, 'О': 0}
+            table[team]['И'] += 1
+            if is_home:
+                if row['FTR'] == 'H': table[team]['В'] += 1; table[team]['О'] += 3
+                elif row['FTR'] == 'D': table[team]['Н'] += 1; table[team]['О'] += 1
+                else: table[team]['П'] += 1
+                table[team]['РГ'] += row['FTHG'] - row['FTAG']
+            else:
+                if row['FTR'] == 'A': table[team]['В'] += 1; table[team]['О'] += 3
+                elif row['FTR'] == 'D': table[team]['Н'] += 1; table[team]['О'] += 1
+                else: table[team]['П'] += 1
+                table[team]['РГ'] += row['FTAG'] - row['FTHAG']
+    return pd.DataFrame([
+        {'Команда': t, **v} for t, v in sorted(table.items(), key=lambda x: -x[1]['О'])
+    ]).head(10)
 
-# === Прогноз в live-матче ===
-def predict_live_match(match):
-    xG1 = float(match['xG'].split(' - ')[0])
-    xG2 = float(match['xG'].split(' - ')[1])
-    score1, score2 = map(int, match['score'].split(':'))
-    time_left = 90 - match['minute']
-
-    adj_xG1 = xG1 + (score1 * 0.5)
-    adj_xG2 = xG2 + (score2 * 0.5)
-
-    total_xG = adj_xG1 + adj_xG2
-    total_pred = "Over 2.5" if total_xG > 3.0 else "Under 2.5"
-
-    if adj_xG1 > adj_xG2 + 0.5:
-        winner = match['home']
-        confidence = "Высокая"
-    elif adj_xG2 > adj_xG1 + 0.5:
-        winner = match['away']
-        confidence = "Высокая"
-    else:
-        winner = "Ничья"
-        confidence = "Средняя"
-
-    return {
-        'winner': winner,
-        'confidence': confidence,
-        'total_pred': total_pred,
-        'adj_xG': f"{adj_xG1:.2f} — {adj_xG2:.2f}"
-    }
+# === Календарь матчей ===
+def get_upcoming_matches(df, days=7):
+    now = datetime.now()
+    future = df[df['Date'] >= now].copy()
+    future = future[future['Date'] <= now + timedelta(days=days)]
+    future = future.sort_values('Date').head(20)
+    future['Дата'] = future['Date'].dt.strftime('%d.%m %H:%M')
+    return future[['Дата', 'HomeTeam', 'AwayTeam', 'League', 'Country']]
 
 # === Отправка сообщения ===
 def send_message(chat_id, text, parse_mode=None):
@@ -114,66 +106,11 @@ def get_updates(offset=None):
         logger.error(f"❌ Ошибка: {e}")
         return {"ok": False}
 
-# === Генерация событий (для симуляции) ===
-def generate_random_event(match):
-    import random
-    events = ["goal", "yellow", "red", "penalty", "shot_on_target"]
-    if random.random() < 0.05:  # 5% шанс события
-        return random.choice(events)
-    return None
-
-# === Отправка push-уведомления ===
-def send_push_notification(message):
-    subscribers = load_push_subscribers()
-    for chat_id in subscribers:
-        send_message(chat_id, message, parse_mode='Markdown')
-        logger.info(f"🔔 Push отправлен в {chat_id}")
-
-# === Проверка live-матчей и push-уведомлений ===
-def check_live_matches_with_push():
-    matches = get_live_matches()
-    for match in matches:
-        event = generate_random_event(match)
-        message = None
-
-        if event == "goal":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            match['score'] = f"{eval(match['score'].split(':')[0]) + 1}:{match['score'].split(':')[1]}" if team == match['home'] else f"{match['score'].split(':')[0]}:{eval(match['score'].split(':')[1]) + 1}"
-            message = f"⚽ *ГОЛ!* {team} забил! Счёт: {match['score']} (мин: {match['minute']})"
-        elif event == "yellow":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"🟨 *ЖЁЛТАЯ КАРТОЧКА* для игрока {team} (мин: {match['minute']})"
-        elif event == "red":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"🟥 *КРАСНАЯ КАРТОЧКА* для игрока {team}! {team} остаётся в меньшинстве (мин: {match['minute']})"
-        elif event == "penalty":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"🎯 *ПЕНАЛЬТИ* для {team}! (мин: {match['minute']})"
-        elif event == "shot_on_target":
-            team = match['home'] if random.choice([True, False]) else match['away']
-            message = f"💥 *УДАР В СТОР! {team}* создаёт момент! (мин: {match['minute']})"
-
-        if message:
-            send_push_notification(message)
-
-        # Прогноз каждые 30 секунд
-        if datetime.now().second % 30 == 0:
-            pred = predict_live_match(match)
-            message = (
-                f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
-                f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
-                f"📊 Владение: {match['possession']}\n"
-                f"🎯 xG: {match['xG']}\n"
-                f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
-                f"📈 Тотал: {pred['total_pred']}"
-            )
-            send_push_notification(message)
-
 # === Основной цикл бота ===
 def run_bot():
     logger.info("✅ Бот запущен — ожидаем команды...")
     offset = None
-    subscribers = load_push_subscribers()
+    df = load_data()
 
     while True:
         try:
@@ -186,44 +123,85 @@ def run_bot():
                     text = msg.get("text", "")
 
                     if text == "/start":
-                        add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Ты подписан на push-уведомления.")
+                        send_message(
+                            chat_id,
+                            "👋 Добро пожаловать в AI Football Analyst!\n\n"
+                            "Команды:\n"
+                            "• /start — это сообщение\n"
+                            "• /leagues — список лиг\n"
+                            "• /table Премьер-лига — таблица\n"
+                            "• /calendar — предстоящие матчи"
+                        )
 
-                    elif text == "/live":
-                        matches = get_live_matches()
-                        for match in matches:
-                            pred = predict_live_match(match)
-                            message = (
-                                f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
-                                f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
-                                f"📊 Владение: {match['possession']}\n"
-                                f"🎯 xG: {match['xG']}\n"
-                                f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
-                                f"📈 Тотал: {pred['total_pred']}"
-                            )
-                            send_message(chat_id, message, parse_mode='Markdown')
+                    elif text == "/leagues":
+                        leagues_list = "\n".join([
+                            f"• {info['name']} — {info['country']}" for info in LEAGUES.values()
+                        ])
+                        send_message(chat_id, f"🌍 *Доступные лиги:*\n\n{leagues_list}", parse_mode='Markdown')
 
-                    elif text == "/subscribe_push":
-                        if add_push_subscriber(chat_id):
-                            send_message(chat_id, "✅ Ты подписан на push-уведомления о матчах!")
+                    elif text.startswith("/table"):
+                        args = text.split()[1:]
+                        if not args:
+                            send_message(chat_id, "❌ Укажи лигу: /table Бундеслига")
+                            continue
+
+                        league_input = " ".join(args).lower()
+                        league_map = {
+                            "премьер-лига": "Premier League",
+                            "бундеслига": "Bundesliga",
+                            "лига 1": "Ligue 1",
+                            "ла лига": "La Liga",
+                            "серия a": "Serie A",
+                            "эредивизи": "Eredivisie",
+                            "украина": "Premier League Ukraine"
+                        }
+                        league = league_map.get(league_input, None)
+
+                        if not league:
+                            send_message(chat_id, "❌ Нет такой лиги. Используй /leagues")
+                        elif df.empty:
+                            send_message(chat_id, "❌ Нет данных")
                         else:
-                            send_message(chat_id, "❌ Ты уже подписан.")
+                            table_df = get_league_table(df, league)
+                            if table_df.empty:
+                                send_message(chat_id, f"❌ Нет данных по {league}")
+                            else:
+                                table_str = "\n".join([
+                                    f"{i+1}. {row['Команда']} — {row['О']} очков"
+                                    for i, row in table_df.iterrows()
+                                ])
+                                send_message(chat_id, f"🏆 Таблица: {league}\n\n{table_str}")
 
-            # Проверка матчей каждые 15 секунд
-            check_live_matches_with_push()
-            time.sleep(15)
+                    elif text == "/calendar":
+                        if df.empty:
+                            send_message(chat_id, "❌ Нет данных")
+                        else:
+                            matches = get_upcoming_matches(df)
+                            if matches.empty:
+                                send_message(chat_id, "📅 Нет предстоящих матчей")
+                            else:
+                                cal_str = "\n".join([
+                                    f"{row['Дата']} — {row['HomeTeam']} vs {row['AwayTeam']} ({row['Country']})"
+                                    for _, row in matches.iterrows()
+                                ])
+                                send_message(chat_id, f"📅 Предстоящие матчи:\n\n{cal_str}")
 
+            time.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("🛑 Бот остановлен")
+            break
         except Exception as e:
             logger.error(f"🚨 Ошибка: {e}")
             time.sleep(10)
 
-# === Веб-сервер ===
+# === Веб-сервер для Render ===
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — LIVE и Push активны</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Все лиги загружены</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -231,7 +209,7 @@ def run_web():
     logger.info(f"🌍 Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
-# === Запуск ===
+# === Запуск бота и веба ===
 if __name__ == "__main__":
     web_thread = threading.Thread(target=run_web, daemon=True)
     web_thread.start()
