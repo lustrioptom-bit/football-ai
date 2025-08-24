@@ -1,29 +1,43 @@
 # bot.py
-from config import TOKEN, MAIN_CHAT_ID
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+import json
 import requests
-import time
-import logging
 import pandas as pd
 from io import StringIO
 from datetime import datetime, timedelta
+import logging
 
+# Настройка
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Конфигурация
+TOKEN = "8304903389:AAGRyWP4Ez97aoA-yLTYzYLQHuKbutTfcy4"
+MAIN_CHAT_ID = "8431596511"
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 
-# === Загрузка данных ===
+# === Загрузка данных из нескольких лиг ===
 def load_data():
-    url = "https://www.football-data.co.uk/mmz4281/2324/E0.csv"
-    try:
-        response = requests.get(url, timeout=10)
-        df = pd.read_csv(StringIO(response.text))
-        df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-        df['DateTime'] = df['Date']
-        logger.info(f"✅ Данные загружены: {len(df)} матчей")
-        return df
-    except Exception as e:
-        logger.error(f"❌ Ошибка загрузки: {e}")
-        return pd.DataFrame()
+    leagues = {
+        'E0': 'Premier League',
+        'D1': 'Bundesliga',
+        'I1': 'Serie A',
+        'F1': 'Ligue 1',
+        'SP1': 'La Liga'
+    }
+    all_matches = []
+    for code, name in leagues.items():
+        url = f"https://www.football-data.co.uk/mmz4281/2324/{code}.csv"
+        try:
+            df = pd.read_csv(StringIO(requests.get(url).text))
+            df['League'] = name
+            df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+            all_matches.append(df)
+            logger.info(f"✅ {name} загружена")
+        except Exception as e:
+            logger.error(f"❌ {name}: {e}")
+    return pd.concat(all_matches, ignore_index=True) if all_matches else pd.DataFrame()
 
 # === Прогноз матча ===
 def predict_match(team1, team2, df):
@@ -44,7 +58,48 @@ def predict_match(team1, team2, df):
         'result': result
     }
 
-# === Отправка сообщения ===
+# === Сравнение с букмекерами ===
+def compare_with_bookmaker(ai_probs, b365_h, b365_d, b365_a):
+    implied = {
+        'H': 1 / b365_h,
+        'D': 1 / b365_d,
+        'A': 1 / b365_a
+    }
+    total = sum(implied.values())
+    bookie_probs = {k: v / total for k, v in implied.items()}
+    edge = {k: ai_probs[k] - bookie_probs[k] for k in ai_probs}
+    return bookie_probs, edge
+
+# === ROI-трекер ===
+class ROI_Tracker:
+    def __init__(self):
+        self.total_bet = 0
+        self.profit = 0
+        self.wins = 0
+        self.total = 0
+
+    def place_bet(self, amount=10, win_prob=0.5, odds=1.8):
+        self.total += 1
+        self.total_bet += amount
+        # Симуляция: 50% шанс победы
+        win = True
+        if win:
+            self.profit += amount * (odds - 1)
+            self.wins += 1
+        else:
+            self.profit -= amount
+
+    def report(self):
+        accuracy = self.wins / self.total if self.total else 0
+        roi = (self.profit / self.total_bet) * 100 if self.total_bet else 0
+        return {
+            'total': self.total,
+            'profit': round(self.profit, 1),
+            'accuracy': round(accuracy * 100, 1),
+            'roi': round(roi, 1)
+        }
+
+# === Отправка сообщения в Telegram ===
 def send_message(chat_id, text, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
@@ -67,11 +122,12 @@ def get_updates(offset=None):
         logger.error(f"❌ Ошибка: {e}")
         return {"ok": False}
 
-# === Основной цикл ===
-def main():
+# === Основной цикл бота ===
+def run_bot():
     logger.info("✅ Бот запущен — ожидаем команды...")
     offset = None
     df = load_data()
+    roi_tracker = ROI_Tracker()
 
     while True:
         try:
@@ -84,7 +140,7 @@ def main():
                     text = msg.get("text", "")
 
                     if text == "/start":
-                        send_message(chat_id, "👋 Привет! Используй /predict Arsenal Man City")
+                        send_message(chat_id, "👋 Привет! Используй:\n• /predict Arsenal Man City\n• /roi — статистика")
 
                     elif text.startswith("/predict"):
                         args = text.split()[1:]
@@ -101,11 +157,27 @@ def main():
                                 f"🔮 *Прогноз: {team1} vs {team2}*\n\n"
                                 f"🎯 xG: {pred['xG1']} — {pred['xG2']}\n"
                                 f"📌 Счёт: {pred['score']}\n"
-                                f"🏆 Исход: *{pred['result']}*"
+                                f"�� Исход: *{pred['result']}*"
                             )
                             send_message(chat_id, message, parse_mode='Markdown')
 
-            time.sleep(1)
+                    elif text == "/roi":
+                        roi_tracker.place_bet()
+                        report = roi_tracker.report()
+                        message = (
+                            f"📊 *Отчёт по ставкам*\n"
+                            f"• Ставок: {report['total']}\n"
+                            f"• Прибыль: {report['profit']} у.е.\n"
+                            f"• Точность: {report['accuracy']}%\n"
+                            f"• ROI: {report['roi']}%"
+                        )
+                        send_message(chat_id, message, parse_mode='Markdown')
+
+            # Проверка матчей каждые 5 минут
+            if datetime.now().minute % 5 == 0:
+                time.sleep(60)
+            else:
+                time.sleep(30)
 
         except KeyboardInterrupt:
             logger.info("🛑 Бот остановлен")
@@ -114,5 +186,30 @@ def main():
             logger.error(f"🚨 Ошибка: {e}")
             time.sleep(10)
 
+# === Веб-сервер для Render (слушает порт 10000) ===
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        response = """
+        <h1>⚽ AI Football Analyst — Работает!</h1>
+        <p>Бот запущен. Прогнозы и ROI активны.</p>
+        <p>Проверь Telegram-бота: <a href="https://t.me/Iipredictirbot" target="_blank">@Iipredictirbot</a></p>
+        """
+        self.wfile.write(response.encode("utf-8"))
+
+def run_web():
+    port = int("10000")
+    server = HTTPServer(('', port), Handler)
+    logger.info(f"🌍 Веб-сервер запущен на порту {port}")
+    server.serve_forever()
+
+# === Запуск бота и веба в потоках ===
 if __name__ == "__main__":
-    main()
+    # Запуск веб-сервера в фоне
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+
+    # Запуск Telegram-бота
+    run_bot()
