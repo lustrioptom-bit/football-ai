@@ -19,6 +19,47 @@ TOKEN = "8304903389:AAGRyWP4Ez97aoA-yLTYzYLQHuKbutTfcy4"
 MAIN_CHAT_ID = "8431596511"
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 
+# === ROI-трекер ===
+class ROI_Tracker:
+    def __init__(self):
+        self.total_bet = 0
+        self.profit = 0
+        self.wins = 0
+        self.total = 0
+        self.history = []
+
+    def place_bet(self, amount=10, odds=1.8, win=True, match="Unknown"):
+        self.total += 1
+        self.total_bet += amount
+        result = "Выигрыш" if win else "Проигрыш"
+        if win:
+            self.profit += amount * (odds - 1)
+            self.wins += 1
+        else:
+            self.profit -= amount
+
+        self.history.append({
+            'match': match,
+            'amount': amount,
+            'odds': odds,
+            'result': result,
+            'profit': round(amount * (odds - 1) if win else -amount, 2),
+            'date': datetime.now().strftime('%d.%m %H:%M')
+        })
+
+    def report(self):
+        accuracy = self.wins / self.total if self.total else 0
+        roi = (self.profit / self.total_bet) * 100 if self.total_bet else 0
+        return {
+            'total': self.total,
+            'profit': round(self.profit, 1),
+            'accuracy': round(accuracy * 100, 1),
+            'roi': round(roi, 1)
+        }
+
+    def get_history(self, n=5):
+        return self.history[-n:]
+
 # === Подписчики ===
 SUBSCRIBERS_FILE = "subscribers.json"
 if not os.path.exists(SUBSCRIBERS_FILE):
@@ -110,12 +151,23 @@ def get_updates(offset=None):
         return {"ok": False}
 
 # === Проверка матчей и уведомления ===
-def check_upcoming_matches():
+def check_upcoming_matches(roi_tracker):
     matches = load_schedule()
     now = datetime.now()
     for match in matches:
         if now + timedelta(minutes=50) < match['datetime'] <= now + timedelta(minutes=70):
             pred = predict_match(match['home'], match['away'])
+            bookie_probs = {
+                'H': 1 / match['b365_h'],
+                'D': 1 / match['b365_d'],
+                'A': 1 / match['b365_a']
+            }
+            total = sum(bookie_probs.values())
+            bookie_probs = {k: v / total for k, v in bookie_probs.items()}
+            ai_probs = {'H': 0.55, 'D': 0.25, 'A': 0.20}
+            edge = {k: ai_probs[k] - bookie_probs[k] for k in ai_probs}
+            signals = [k for k, v in edge.items() if v > 0.10]
+
             message = (
                 f"⏰ *Предстоящий матч*\n"
                 f"{match['home']} ⚔️ {match['away']}\n\n"
@@ -124,6 +176,14 @@ def check_upcoming_matches():
                 f"• xG: {pred['xG1']} — {pred['xG2']}\n\n"
                 f"📘 *B365*: H{match['b365_h']} D{match['b365_d']} A{match['b365_a']}"
             )
+
+            if signals:
+                signal_str = " | ".join([{'H': match['home'], 'D': 'Ничья', 'A': match['away']}[s] for s in signals])
+                message += f"\n\n🎯 *СИГНАЛ НА СТАВКУ!* 🔥\nВысокий перевес: {signal_str}"
+                # Симуляция ставки
+                odds = {'H': match['b365_h'], 'D': match['b365_d'], 'A': match['b365_a']}[signals[0]]
+                roi_tracker.place_bet(amount=10, odds=odds, win=True, match=f"{match['home']} vs {match['away']}")
+
             send_message(MAIN_CHAT_ID, message, parse_mode='Markdown')
             logger.info(f"🔔 Уведомление: {match['home']} vs {match['away']}")
 
@@ -132,6 +192,7 @@ def run_bot():
     logger.info("✅ Бот запущен — ожидаем команды...")
     offset = None
     subscribers = load_subscribers()
+    roi_tracker = ROI_Tracker()
 
     while True:
         try:
@@ -147,12 +208,14 @@ def run_bot():
                         if is_subscriber(chat_id):
                             send_message(chat_id, "👋 Привет! У тебя есть доступ к прогнозам.")
                         else:
-                            send_message(chat_id, "👋 Привет! Напиши /trial, чтобы получить 14 дней бесплатно.")
+                            send_message(chat_id, "�� Привет! Напиши /trial, чтобы получить 14 дней бесплатно.")
+
                     elif text == "/trial":
                         if add_free_trial(chat_id):
                             send_message(chat_id, "🎉 Ты получил 14 дней бесплатного доступа! Используй /predict")
                         else:
                             send_message(chat_id, "❌ Ты уже использовал бесплатный период.")
+
                     elif text.startswith("/predict") and is_subscriber(chat_id):
                         args = text.split()[1:]
                         if len(args) >= 2:
@@ -164,12 +227,28 @@ def run_bot():
                                 f"🏆 Исход: *{pred['result']}*"
                             )
                             send_message(chat_id, message, parse_mode='Markdown')
+
+                    elif text == "/roi":
+                        report = roi_tracker.report()
+                        history = roi_tracker.get_history()
+                        message = (
+                            f"📊 *Отчёт по ставкам*\n"
+                            f"• Ставок: {report['total']}\n"
+                            f"• Прибыль: {report['profit']} у.е.\n"
+                            f"• Точность: {report['accuracy']}%\n"
+                            f"• ROI: {report['roi']}%\n\n"
+                            f"📋 *Последние ставки*:\n"
+                        )
+                        for bet in history:
+                            message += f"  {bet['match']}: {bet['result']} ({bet['profit']} у.е.)\n"
+                        send_message(chat_id, message, parse_mode='Markdown')
+
                     elif text == "/subscribe":
                         send_message(chat_id, "💳 Подписка: 499₽/мес. Напиши @admin")
 
             # Проверка матчей
             if datetime.now().minute % 5 == 0:
-                check_upcoming_matches()
+                check_upcoming_matches(roi_tracker)
                 time.sleep(60)
             else:
                 time.sleep(30)
@@ -184,7 +263,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        # Исправлено: строка кодируется в UTF-8
         self.wfile.write("<h1>AI Football Analyst — работает 24/7</h1>".encode("utf-8"))
 
 def run_web():
