@@ -2,13 +2,8 @@
 services:
   - type: web
     name: football-ai-web
-    runtime: python
+    env: python
     startCommand: cd web && streamlit run app.py --server.port $PORT
     envVars:
       - key: PORT
         value: 10000
-
-  - type: webhook
-    name: football-ai-bot
-    runtime: python
-    startCommand: python bot.py
