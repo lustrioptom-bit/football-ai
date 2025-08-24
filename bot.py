@@ -41,8 +41,8 @@ def add_push_subscriber(chat_id):
         return True
     return False
 
-# === Загрузка live-матчей с API-Football (RapidAPI) ===
-def get_live_matches():
+# === Загрузка live-матчей и коэффициентов с API-Football ===
+def get_live_matches_with_odds():
     url = "https://v3.football.api-sports.io/fixtures?live=all"
     headers = {
         'x-rapidapi-host': 'v3.football.api-sports.io',
@@ -76,6 +76,16 @@ def get_live_matches():
                         if 'xG' in event:
                             match_data['xG_home'] = round(event['xG']['home'], 2)
                             match_data['xG_away'] = round(event['xG']['away'], 2)
+                        # Коэффициенты (B365)
+                        if 'bookmakers' in event.get('odds', {}):
+                            for bookmaker in event['odds']['bookmakers']:
+                                if bookmaker['id'] == 8:  # Bet365
+                                    for bet in bookmaker['bets']:
+                                        if bet['name'] == 'Match Winner':
+                                            odds = bet['values']
+                                            match_data['odds_home'] = odds[0]['odd']
+                                            match_data['odds_draw'] = odds[1]['odd']
+                                            match_data['odds_away'] = odds[2]['odd']
                         matches.append(match_data)
                 except Exception as e:
                     logger.warning(f"Пропущен матч: {e}")
@@ -115,6 +125,58 @@ def predict_live_match(match):
         'adj_xG': f"{adj_xG1:.2f} — {adj_xG2:.2f}"
     }
 
+# === Сравнение AI и коэффициентов ===
+def compare_ai_vs_odds(ai_probs, odds_home, odds_draw, odds_away):
+    implied = {
+        'H': 1 / float(odds_home),
+        'D': 1 / float(odds_draw),
+        'A': 1 / float(odds_away)
+    }
+    total = sum(implied.values())
+    bookie_probs = {k: v / total for k, v in implied.items()}
+    edge = {k: ai_probs[k] - bookie_probs[k] for k in ai_probs}
+    return bookie_probs, edge
+
+# === ROI-трекер ===
+class ROI_Tracker:
+    def __init__(self):
+        self.total_bet = 0
+        self.profit = 0
+        self.wins = 0
+        self.total = 0
+        self.history = []
+
+    def place_bet(self, amount=10, odds=1.8, win=True, match="Unknown"):
+        self.total += 1
+        self.total_bet += amount
+        result = "Выигрыш" if win else "Проигрыш"
+        if win:
+            self.profit += amount * (odds - 1)
+            self.wins += 1
+        else:
+            self.profit -= amount
+        self.history.append({
+            'match': match,
+            'amount': amount,
+            'odds': odds,
+            'result': result,
+            'profit': round(amount * (odds - 1) if win else -amount, 2),
+            'date': time.strftime('%d.%m %H:%M')
+        })
+
+    def report(self):
+        accuracy = self.wins / self.total if self.total else 0
+        roi = (self.profit / self.total_bet) * 100 if self.total_bet else 0
+        return {
+            'total': self.total,
+            'profit': round(self.profit, 1),
+            'accuracy': round(accuracy * 100, 1),
+            'roi': round(roi, 1)
+        }
+
+    def get_history(self, n=5):
+        return self.history[-n:]
+
 # === Отправка сообщения в Telegram ===
 def send_message(chat_id, text, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
@@ -139,8 +201,8 @@ def get_updates(offset=None):
         return {"ok": False}
 
 # === Проверка live-матчей и push-уведомлений ===
-def check_live_matches_with_push():
-    matches = get_live_matches()
+def check_live_matches_with_push(roi_tracker):
+    matches = get_live_matches_with_odds()
     if not matches:
         logger.info("🔴 Нет live-матчей или ошибка API")
         return
@@ -151,11 +213,25 @@ def check_live_matches_with_push():
             f"🔴 *LIVE: {match['home']} vs {match['away']}*\n"
             f"🏆 {match['league']}\n"
             f"⏱️ {match['minute']}' | Счёт: {match['score']}\n"
+            f"�� xG: {match.get('xG_home', 'N/A')} — {match.get('xG_away', 'N/A')}\n"
         )
-        if 'xG_home' in match:
-            message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
+        if 'odds_home' in match:
+            message += f"📘 B365: H{match['odds_home']} D{match['odds_draw']} A{match['odds_away']}\n"
+
+        # Сигналы
+        if 'odds_home' in match:
+            ai_probs = {'H': 0.55, 'D': 0.25, 'A': 0.20}
+            bookie, edge = compare_ai_vs_odds(ai_probs, match['odds_home'], match['odds_draw'], match['odds_away'])
+            signals = [k for k, v in edge.items() if v > 0.10]
+            if signals:
+                signal_str = " | ".join([{'H': match['home'], 'D': 'Ничья', 'A': match['away']}[s] for s in signals])
+                message += f"🔥 *СИГНАЛ НА СТАВКУ!* ��\nВысокий перевес: {signal_str}"
+                # Симуляция ставки
+                odds = {'H': match['odds_home'], 'D': match['odds_draw'], 'A': match['odds_away']}[signals[0]]
+                roi_tracker.place_bet(amount=10, odds=float(odds), win=True, match=f"{match['home']} vs {match['away']}")
+
         message += (
-            f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
+            f"\n🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
             f"📈 Тотал: *{pred['total_pred']}*"
         )
         send_message(MAIN_CHAT_ID, message, parse_mode='Markdown')
@@ -165,6 +241,7 @@ def check_live_matches_with_push():
 def run_bot():
     logger.info("✅ Бот запущен — ожидаем команды...")
     offset = None
+    roi_tracker = ROI_Tracker()
 
     while True:
         try:
@@ -178,10 +255,10 @@ def run_bot():
 
                     if text == "/start":
                         add_push_subscriber(chat_id)
-                        send_message(chat_id, "👋 Привет! Live-матчи подключены через API-Football.")
+                        send_message(chat_id, "👋 Привет! Live-матчи, коэффициенты и ROI активны.")
 
                     elif text == "/live":
-                        matches = get_live_matches()
+                        matches = get_live_matches_with_odds()
                         if not matches:
                             send_message(chat_id, "🔴 Сейчас нет live-матчей.")
                         else:
@@ -194,14 +271,31 @@ def run_bot():
                                 )
                                 if 'xG_home' in match:
                                     message += f"🎯 xG: {match['xG_home']} — {match['xG_away']}\n"
+                                if 'odds_home' in match:
+                                    message += f"📘 B365: H{match['odds_home']} D{match['odds_draw']} A{match['odds_away']}\n"
                                 message += (
                                     f"🔥 Прогноз: *{pred['winner']}* ({pred['confidence']})\n"
                                     f"📈 Тотал: *{pred['total_pred']}*"
                                 )
                                 send_message(chat_id, message, parse_mode='Markdown')
 
+                    elif text == "/roi":
+                        report = roi_tracker.report()
+                        history = roi_tracker.get_history()
+                        message = (
+                            f"📊 *Отчёт по ставкам*\n"
+                            f"• Ставок: {report['total']}\n"
+                            f"• Прибыль: {report['profit']} у.е.\n"
+                            f"• Точность: {report['accuracy']}%\n"
+                            f"• ROI: {report['roi']}%\n\n"
+                            f"📋 *Последние ставки*:\n"
+                        )
+                        for bet in history:
+                            message += f"  {bet['match']}: {bet['result']} ({bet['profit']} у.е.)\n"
+                        send_message(chat_id, message, parse_mode='Markdown')
+
             # Проверка каждые 30 секунд
-            check_live_matches_with_push()
+            check_live_matches_with_push(roi_tracker)
             time.sleep(30)
 
         except Exception as e:
@@ -214,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write("<h1>AI Football Analyst — Live-матчи через API-Football</h1>".encode("utf-8"))
+        self.wfile.write("<h1>AI Football Analyst — Коэффициенты и ROI активны</h1>".encode("utf-8"))
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
